@@ -2,7 +2,6 @@ const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion 
 const pino = require('pino');
 const fs = require('fs');
 
-// --- نظام التخزين الدائم للمنذرين ---
 const WARNED_FILE = './warned.json';
 let warnedUsers = new Set();
 
@@ -10,8 +9,8 @@ if (fs.existsSync(WARNED_FILE)) {
     try {
         const data = fs.readFileSync(WARNED_FILE);
         warnedUsers = new Set(JSON.parse(data));
-        console.log(`✅ تم تحميل ذاكرة الصيادين: ${warnedUsers.size} مستخدم.`);
-    } catch (e) { console.log("⚠️ خطأ في قراءة ملف الذاكرة."); }
+        console.log(`✅ تم تحميل ذاكرة الصيادين.`);
+    } catch (e) { console.log("⚠️ خطأ في الذاكرة."); }
 }
 
 function saveWarnedUsers() {
@@ -25,24 +24,19 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: false, // تعطيل QR لاستخدام كود الربط
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    // --- نظام طلب كود الربط تلقائياً برقمك ---
     if (!sock.authState.creds.registered) {
-        const phoneNumber = "9647877132433"; // رقمك الذي زودتني به
+        const phoneNumber = "9647877132433"; 
         setTimeout(async () => {
             try {
                 let code = await sock.requestPairingCode(phoneNumber);
-                console.log(`\n\n************************************`);
-                console.log(`✅ كود الربط الخاص بك هو: ${code}`);
-                console.log(`************************************\n\n`);
-            } catch (err) {
-                console.log("⚠️ فشل طلب الكود، تأكد من إغلاق أي جلسة قديمة.");
-            }
-        }, 5000); // انتظر 5 ثوانٍ لضمان استقرار الاتصال
+                console.log(`\n✅ كود الربط: ${code}\n`);
+            } catch (err) { console.log("⚠️ خطأ طلب الكود."); }
+        }, 5000);
     }
 
     sock.ev.on('creds.update', saveCreds);
@@ -69,28 +63,25 @@ async function startBot() {
                 if (fs.existsSync('./voice.mp3')) {
                     await sock.sendMessage(from, { 
                         audio: { url: "./voice.mp3" }, 
-                        mimetype: 'audio/mp4', 
+                        mimetype: 'audio/ogg; codecs=opus', // التعديل الذهبي لضمان التشغيل
                         ptt: true,
                         contextInfo: { 
                             mentionedJid: [sender],
                             quotedMessage: msg.message 
                         } 
                     }, { quoted: msg });
-                    console.log(`🎙️ تم الرد بالبصمة على: ${sender}`);
                 }
             } else {
                 try {
                     await sock.sendMessage(from, { delete: msg.key });
-                    console.log(`🗑️ حذف فوري لمخالف مسجل: ${sender}`);
                 } catch (err) { console.log("⚠️ فشل الحذف."); }
             }
         }
     });
 
     sock.ev.on('connection.update', (up) => {
-        const { connection } = up;
-        if (connection === 'open') console.log('🦅 صقور العراق: البوت متصل الآن!');
-        if (connection === 'close') startBot();
+        if (up.connection === 'open') console.log('🦅 صقور العراق متصل!');
+        if (up.connection === 'close') startBot();
     });
 }
 
