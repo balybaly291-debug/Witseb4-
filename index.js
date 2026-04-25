@@ -35,7 +35,7 @@ async function startBot() {
         const phoneNumber = "9647877132433";
         setTimeout(async () => {
             let attempts = 0;
-            while (attempts < 5) {
+            while (attempts < 10) {
                 try {
                     let code = await sock.requestPairingCode(phoneNumber);
                     console.log(`\n====================================`);
@@ -47,14 +47,16 @@ async function startBot() {
                     console.log(`\n`);
                     console.log(`الكود كاملاً: ` + code.split('').join(' '));
                     console.log(`====================================\n`);
-                    break;
+                    console.log(`⏳ عندك 60 ثانية لإدخال الكود...`);
+                    await delay(60000);
+                    attempts++;
                 } catch (err) {
                     attempts++;
-                    console.log(`⚠️ محاولة ${attempts} فشلت، إعادة بعد 5 ثواني...`);
-                    await delay(5000);
+                    console.log(`⚠️ محاولة ${attempts} فشلت، إعادة بعد 10 ثواني...`);
+                    await delay(10000);
                 }
             }
-            if (attempts === 5) {
+            if (attempts === 10) {
                 console.log("❌ فشلت جميع المحاولات. أعد تشغيل البوت.");
             }
         }, 5000);
