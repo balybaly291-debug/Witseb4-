@@ -38,9 +38,15 @@ async function startBot() {
             while (attempts < 5) {
                 try {
                     let code = await sock.requestPairingCode(phoneNumber);
-                    console.log(`\n************************************`);
-                    console.log(`✅ كود الربط: ${code}`);
-                    console.log(`************************************\n`);
+                    console.log(`\n====================================`);
+                    console.log(`✅ كود الربط الخاص بك:`);
+                    console.log(`\n`);
+                    for (const char of code) {
+                        console.log(char);
+                    }
+                    console.log(`\n`);
+                    console.log(`الكود كاملاً: ` + code.split('').join(' '));
+                    console.log(`====================================\n`);
                     break;
                 } catch (err) {
                     attempts++;
