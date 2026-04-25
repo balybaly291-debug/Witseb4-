@@ -2,6 +2,11 @@ const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion,
 const pino = require('pino');
 const fs = require('fs');
 
+// منع Railway من إيقاف البوت أثناء الربط
+process.on('SIGTERM', () => console.log('⚠️ SIGTERM — البوت يستمر...'));
+process.on('SIGINT', () => console.log('⚠️ SIGINT — البوت يستمر...'));
+process.on('uncaughtException', (err) => console.log('⚠️ خطأ غير متوقع:', err.message));
+
 // --- نظام الذاكرة للمستخدمين الذين تم تنبيههم ---
 const WARNED_FILE = './warned.json';
 let warnedUsers = new Set();
