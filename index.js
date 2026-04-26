@@ -26,7 +26,7 @@ async function addWarned(sender) {
 
 // --- فحص إذا الرابط من فيسبوك أو تيك توك ---
 function isFbOrTiktok(text) {
-    return /(facebook\.com|fb\.com|fb\.watch|tiktok\.com|vm\.tiktok\.com|instagram\.com|instagr\.am)/i.test(text);
+    return /(facebook\.com|fb\.com|fb\.watch|tiktok\.com|vm\.tiktok\.com)/i.test(text);
 }
 
 // --- فحص إذا الرسالة تحتوي رابط عادي (غير فيسبوك وتيك توك) ---
@@ -42,17 +42,16 @@ function countWords(text) {
     return text.trim().split(/\s+/).length;
 }
 
-// --- فحص إذا الرسالة تحتوي حروف عربية أو إنجليزية ---
+// --- فحص إذا الرسالة نصية حقيقية ---
 function isRealText(content, type, msg) {
     if (type !== 'conversation' && type !== 'extendedTextMessage') return false;
     if (!content || content.trim().length === 0) return false;
-    // تجاهل المنشن
     const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 || content.includes('@');
     if (hasMention) return false;
-    // تجاهل الروابط (ما عدا فيسبوك وتيك توك وانستقرام)
     if (hasLink(content)) return false;
-    // أي رسالة فيها حرف عربي أو إنجليزي = تعامل معها
-    return /[\u0600-\u06FFa-zA-Z]/.test(content);
+    const hasRealChar = /[\u0600-\u06FFa-zA-Z0-9]/.test(content);
+    if (!hasRealChar) return false;
+    return true;
 }
 
 // --- تحويل MP3 إلى OGG ---
