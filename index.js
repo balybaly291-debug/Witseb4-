@@ -20,21 +20,18 @@ async function isWarned(sender) {
 
 async function addWarned(sender) {
     try {
-        // TTL = 7 أيام (604800 ثانية)
         await redis.set(`warned:${sender}`, '1', { EX: 604800 });
     } catch (e) { console.log('⚠️ فشل الحفظ في Redis'); }
 }
 
-// --- فحص إذا الرابط من فيسبوك أو تيك توك ---
-function isFbOrTiktok(text) {
-    return /(facebook\.com|fb\.com|fb\.watch|tiktok\.com|vm\.tiktok\.com)/i.test(text);
-}
-
-// --- فحص إذا الرسالة تحتوي رابط عادي (غير فيسبوك وتيك توك) ---
-function hasLink(text) {
-    if (isFbOrTiktok(text)) return false;
-    const linkRegex = /(https?:\/\/|www\.)[^\s]+|[^\s]+\.(com|net|org|io|ly|me|app|co|gg|tv|ru|uk|de|fr|ar|iq|sa|ae|eg)[^\s]*/gi;
-    return linkRegex.test(text);
+// --- حذف فوري ---
+async function deleteMessage(sock, from, msgKey) {
+    try {
+        await sock.sendMessage(from, { delete: msgKey });
+        console.log(`🗑️ تم الحذف`);
+    } catch (err) {
+        console.log(`⚠️ فشل الحذف: ${err.message}`);
+    }
 }
 
 // --- عد الكلمات ---
@@ -97,79 +94,82 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ✅ cache لمنع معالجة نفس الرسالة مرتين
-    const processedMessages = new Set();
-
     sock.ev.on('messages.upsert', async (m) => {
+        if (m.type !== 'notify') return;
+
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe || !msg.key.remoteJid.endsWith('@g.us')) return;
-
-        // ✅ تجاهل الرسالة إذا عالجناها مسبقاً
-        const msgId = msg.key.id;
-        if (processedMessages.has(msgId)) {
-            console.log(`⏭️ تجاهل رسالة مكررة: ${msgId}`);
-            return;
-        }
-        processedMessages.add(msgId);
-        // تنظيف الـ cache كل 1000 رسالة
-        if (processedMessages.size > 1000) processedMessages.clear();
 
         const from = msg.key.remoteJid;
         const sender = msg.key.participant || msg.key.remoteJid;
         const type = Object.keys(msg.message)[0];
         const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
+        // ✅ أرقام المشرفين - لا تُحذف رسائلهم أبداً
+        const ADMINS = ["9647877132433@s.whatsapp.net"];
+        if (ADMINS.includes(sender)) return;
+
+        // فقط رسائل نصية
+        const isText = type === 'conversation' || type === 'extendedTextMessage';
+        if (!isText) {
+            console.log(`⛔ تجاهل نوع: ${type} من ${sender}`);
+            return;
+        }
+        if (!content || content.trim().length === 0) {
+            console.log(`⛔ محتوى فارغ من ${sender}`);
+            return;
+        }
+
+        // ✅ التاك مسموح للجميع - تجاهل أي رسالة فيها mention
+        const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0;
+        if (hasMention) {
+            console.log(`🔕 تجاهل تاك من: ${sender}`);
+            return;
+        }
+
+        console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
+
         // ══════════════════════════════════════════
-        // معالجة الصور (imageMessage)
+        // أوامر المشرف
         // ══════════════════════════════════════════
-        if (type === 'imageMessage') {
-            const caption = msg.message.imageMessage?.caption || "";
-            const wordCount = countWords(caption);
 
-            console.log(`🖼️ صورة من ${sender} - عدد الكلمات: ${wordCount}`);
-
-            if (wordCount > 10) {
-                try {
-                    await sock.sendMessage(from, { delete: msg.key });
-                    console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
-                } catch (err) { console.log("⚠️ فشل الحذف."); }
-
-            } else if (wordCount > 5) {
-                if (oggPath && fs.existsSync(oggPath)) {
-                    try {
-                        await sock.sendMessage(from, {
-                            audio: fs.readFileSync(oggPath),
-                            mimetype: 'audio/ogg; codecs=opus',
-                            ptt: true,
-                        }, { quoted: msg });
-                        console.log(`🎙️ بصمة صوتية لصورة (+5 كلمة) من: ${sender}`);
-                    } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
-                }
+        // !remove → حذف شخص من القائمة (بالرد على رسالته)
+        if (content.trim() === '!remove') {
+            const quoted = msg.message.extendedTextMessage?.contextInfo?.participant;
+            if (quoted) {
+                await redis.del(`warned:${quoted}`);
+                await sock.sendMessage(from, { text: `✅ تم حذف ${quoted} من القائمة` });
+                console.log(`✅ تم حذف ${quoted} من القائمة`);
+            } else {
+                await sock.sendMessage(from, { text: `⚠️ ارد على رسالة الشخص ثم اكتب !remove` });
             }
             return;
         }
 
-        // ══════════════════════════════════════════
-        // معالجة الرسائل النصية
-        // ══════════════════════════════════════════
-        const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
-        if (isMedia) return;
+        // !removeall → حذف الكل
+        if (content.trim() === '!removeall') {
+            await redis.flushAll();
+            await sock.sendMessage(from, { text: `✅ تم حذف جميع المحفوظين` });
+            console.log(`✅ تم مسح Redis كاملاً`);
+            return;
+        }
 
-        // تجاهل إذا مو نص
-        const isText = type === 'conversation' || type === 'extendedTextMessage';
-        if (!isText) return;
-
-        // تجاهل إذا محتوى فارغ
-        if (!content || content.trim().length === 0) return;
-
-        console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
+        // !check → التحقق إذا شخص محفوظ (بالرد على رسالته)
+        if (content.trim() === '!check') {
+            const quoted = msg.message.extendedTextMessage?.contextInfo?.participant;
+            if (quoted) {
+                const w = await isWarned(quoted);
+                await sock.sendMessage(from, { text: w ? `🔴 ${quoted} محفوظ` : `🟢 ${quoted} غير محفوظ` });
+            }
+            return;
+        }
 
         const warned = await isWarned(sender);
+        console.log(`🔍 ${sender} | محفوظ: ${warned}`);
 
         if (!warned) {
-            // ✅ شخص جديد → إرسال البصمة أولاً ثم الحفظ
-            console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
-
+            // شخص جديد → بصمة صوتية + حفظ
+            console.log(`🆕 جديد: ${sender} → إرسال البصمة`);
             if (oggPath && fs.existsSync(oggPath)) {
                 try {
                     await sock.sendMessage(from, {
@@ -177,18 +177,14 @@ async function startBot() {
                         mimetype: 'audio/ogg; codecs=opus',
                         ptt: true,
                     }, { quoted: msg });
-                    console.log(`🎙️ تم إرسال البصمة لـ: ${sender}`);
+                    console.log(`🎙️ تم إرسال البصمة`);
                 } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
             }
-
             await addWarned(sender);
 
         } else {
-            // ✅ شخص محفوظ → حذف أي رسالة يكتبها بدون استثناء
-            console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
-            try {
-                await sock.sendMessage(from, { delete: msg.key });
-            } catch (err) { console.log("⚠️ فشل الحذف - تأكد أن البوت مشرف."); }
+            console.log(`🗑️ محفوظ: حذف رسالة ${sender}`);
+            await deleteMessage(sock, from, msg.key);
         }
     });
 
