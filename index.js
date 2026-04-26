@@ -20,7 +20,8 @@ async function isWarned(sender) {
 
 async function addWarned(sender) {
     try {
-        await redis.set(`warned:${sender}`, '1');
+        // TTL = 7 أيام (604800 ثانية) - غيّرها حسب رغبتك
+        await redis.set(`warned:${sender}`, '1', { EX: 604800 });
     } catch (e) { console.log('⚠️ فشل الحفظ في Redis'); }
 }
 
@@ -31,7 +32,7 @@ function isFbOrTiktok(text) {
 
 // --- فحص إذا الرسالة تحتوي رابط عادي (غير فيسبوك وتيك توك) ---
 function hasLink(text) {
-    if (isFbOrTiktok(text)) return false; // استثناء فيسبوك وتيك توك
+    if (isFbOrTiktok(text)) return false;
     const linkRegex = /(https?:\/\/|www\.)[^\s]+|[^\s]+\.(com|net|org|io|ly|me|app|co|gg|tv|ru|uk|de|fr|ar|iq|sa|ae|eg)[^\s]*/gi;
     return linkRegex.test(text);
 }
@@ -156,19 +157,20 @@ async function startBot() {
         const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
         if (isMedia) return;
 
-        if (!isRealText(content, type, msg)) {
-            if (hasLink(content)) console.log(`🔗 تجاهل رابط من: ${sender}`);
-            return;
-        }
+        // تجاهل إذا مو نص أصلاً
+        const isText = type === 'conversation' || type === 'extendedTextMessage';
+        if (!isText) return;
 
-        console.log(`📨 رسالة من ${sender}: "${content}"`);
+        // تجاهل إذا محتوى فارغ
+        if (!content || content.trim().length === 0) return;
+
+        console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
 
         const warned = await isWarned(sender);
 
         if (!warned) {
-            // أول رسالة → بصمة + حفظ
+            // شخص جديد → إرسال البصمة على أي رسالة نصية بدون تصفية
             console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
-            await addWarned(sender);
 
             if (oggPath && fs.existsSync(oggPath)) {
                 try {
@@ -181,8 +183,11 @@ async function startBot() {
                 } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
             }
 
+            // الحفظ بعد الإرسال
+            await addWarned(sender);
+
         } else {
-            // محفوظ → حذف فوري
+            // شخص محفوظ → حذف أي رسالة يكتبها بدون استثناء
             console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
             try {
                 await sock.sendMessage(from, { delete: msg.key });
