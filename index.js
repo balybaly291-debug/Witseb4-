@@ -94,6 +94,9 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // cache للرسائل النصية (لاستخدامها عند اللايك)
+    const textMessageIds = new Set();
+
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type !== 'notify') return;
 
@@ -109,25 +112,33 @@ async function startBot() {
         const ADMINS = ["9647877132433@s.whatsapp.net"];
         if (ADMINS.includes(sender)) return;
 
-        // فقط رسائل نصية
-        const isText = type === 'conversation' || type === 'extendedTextMessage';
-        if (!isText) {
-            console.log(`⛔ تجاهل نوع: ${type} من ${sender}`);
-            return;
-        }
-        if (!content || content.trim().length === 0) {
-            console.log(`⛔ محتوى فارغ من ${sender}`);
-            return;
-        }
+        // فقط رسائل نصية - تجاهل كل أنواع الميديا والستيكر
+        const isMedia = ['videoMessage','stickerMessage','audioMessage','documentMessage','imageMessage','reactionMessage'].includes(type);
+        if (isMedia) return;
 
-        // ✅ التاك مسموح للجميع - تجاهل أي رسالة فيها mention
+        const isText = type === 'conversation' || type === 'extendedTextMessage';
+        if (!isText) return;
+
+        if (!content || content.trim().length === 0) return;
+
+        // تجاهل إذا فيها تاك (@mention)
         const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0;
         if (hasMention) {
             console.log(`🔕 تجاهل تاك من: ${sender}`);
             return;
         }
 
+        // تجاهل إذا الرسالة إيموجي فقط
+        const emojiOnly = /^(\p{Emoji}|\s)+$/u.test(content.trim());
+        if (emojiOnly) {
+            console.log(`🔕 تجاهل إيموجي من: ${sender}`);
+            return;
+        }
+
         console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
+        // حفظ ID الرسالة النصية
+        textMessageIds.add(msg.key.id);
+        if (textMessageIds.size > 2000) textMessageIds.clear();
 
         // ══════════════════════════════════════════
         // أوامر المشرف
@@ -185,6 +196,37 @@ async function startBot() {
         } else {
             console.log(`🗑️ محفوظ: حذف رسالة ${sender}`);
             await deleteMessage(sock, from, msg.key);
+        }
+    });
+
+    // ✅ حذف الرسالة عند أي رد فعل (لايك أو أي إيموجي)
+    sock.ev.on('messages.reaction', async (reactions) => {
+        for (const reaction of reactions) {
+            // فقط إذا في إيموجي (مو إزالة رد فعل)
+            if (!reaction.reaction.text) continue;
+
+            const from = reaction.key.remoteJid;
+            if (!from.endsWith('@g.us')) continue;
+
+            // ✅ تجاهل رسائل البوت نفسه
+            if (reaction.key.fromMe) {
+                console.log(`🔕 تجاهل لايك على رسالة البوت`);
+                continue;
+            }
+
+            // ✅ فقط إذا كانت الرسالة نصية
+            if (!textMessageIds.has(reaction.key.id)) {
+                console.log(`🔕 تجاهل لايك على رسالة غير نصية`);
+                continue;
+            }
+
+            console.log(`👆 لايك على رسالة نصية - جاري الحذف`);
+            try {
+                await sock.sendMessage(from, { delete: reaction.key });
+                console.log(`🗑️ تم حذف الرسالة عبر رد الفعل`);
+            } catch (err) {
+                console.log(`⚠️ فشل الحذف عبر رد الفعل: ${err.message}`);
+            }
         }
     });
 
