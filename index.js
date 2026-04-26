@@ -20,21 +20,8 @@ async function isWarned(sender) {
 
 async function addWarned(sender) {
     try {
-        // TTL = 7 أيام (604800 ثانية)
         await redis.set(`warned:${sender}`, '1', { EX: 604800 });
     } catch (e) { console.log('⚠️ فشل الحفظ في Redis'); }
-}
-
-// --- فحص إذا الرابط من فيسبوك أو تيك توك ---
-function isFbOrTiktok(text) {
-    return /(facebook\.com|fb\.com|fb\.watch|tiktok\.com|vm\.tiktok\.com)/i.test(text);
-}
-
-// --- فحص إذا الرسالة تحتوي رابط عادي (غير فيسبوك وتيك توك) ---
-function hasLink(text) {
-    if (isFbOrTiktok(text)) return false;
-    const linkRegex = /(https?:\/\/|www\.)[^\s]+|[^\s]+\.(com|net|org|io|ly|me|app|co|gg|tv|ru|uk|de|fr|ar|iq|sa|ae|eg)[^\s]*/gi;
-    return linkRegex.test(text);
 }
 
 // --- عد الكلمات ---
@@ -97,21 +84,18 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ✅ cache لمنع معالجة نفس الرسالة مرتين
+    // cache لمنع معالجة نفس الرسالة مرتين
     const processedMessages = new Set();
 
     sock.ev.on('messages.upsert', async (m) => {
+        if (m.type !== 'notify') return;
+
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe || !msg.key.remoteJid.endsWith('@g.us')) return;
 
-        // ✅ تجاهل الرسالة إذا عالجناها مسبقاً
         const msgId = msg.key.id;
-        if (processedMessages.has(msgId)) {
-            console.log(`⏭️ تجاهل رسالة مكررة: ${msgId}`);
-            return;
-        }
+        if (processedMessages.has(msgId)) return;
         processedMessages.add(msgId);
-        // تنظيف الـ cache كل 1000 رسالة
         if (processedMessages.size > 1000) processedMessages.clear();
 
         const from = msg.key.remoteJid;
@@ -125,15 +109,12 @@ async function startBot() {
         if (type === 'imageMessage') {
             const caption = msg.message.imageMessage?.caption || "";
             const wordCount = countWords(caption);
-
             console.log(`🖼️ صورة من ${sender} - عدد الكلمات: ${wordCount}`);
-
             if (wordCount > 10) {
                 try {
                     await sock.sendMessage(from, { delete: msg.key });
                     console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
                 } catch (err) { console.log("⚠️ فشل الحذف."); }
-
             } else if (wordCount > 5) {
                 if (oggPath && fs.existsSync(oggPath)) {
                     try {
@@ -155,21 +136,25 @@ async function startBot() {
         const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
         if (isMedia) return;
 
-        // تجاهل إذا مو نص
         const isText = type === 'conversation' || type === 'extendedTextMessage';
         if (!isText) return;
 
-        // تجاهل إذا محتوى فارغ
         if (!content || content.trim().length === 0) return;
 
-        console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
+        // ✅ التاكات مسموحة للجميع
+        const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0;
+        if (hasMention) {
+            console.log(`🔕 تجاهل تاك من: ${sender}`);
+            return;
+        }
+
+        console.log(`📨 رسالة من ${sender}: "${content}"`);
 
         const warned = await isWarned(sender);
 
         if (!warned) {
-            // ✅ شخص جديد → إرسال البصمة أولاً ثم الحفظ
+            // شخص جديد → بصمة أولاً ثم الحفظ
             console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
-
             if (oggPath && fs.existsSync(oggPath)) {
                 try {
                     await sock.sendMessage(from, {
@@ -180,11 +165,10 @@ async function startBot() {
                     console.log(`🎙️ تم إرسال البصمة لـ: ${sender}`);
                 } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
             }
-
             await addWarned(sender);
 
         } else {
-            // ✅ شخص محفوظ → حذف أي رسالة يكتبها بدون استثناء
+            // شخص محفوظ → حذف فوري
             console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
             try {
                 await sock.sendMessage(from, { delete: msg.key });
