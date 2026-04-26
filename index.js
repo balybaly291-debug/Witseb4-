@@ -198,7 +198,7 @@ async function startBot() {
             if (shouldReconnect) {
                 console.log('🔄 إعادة الاتصال...');
                 startBot();
-            }
+            
         }
     });
 }
