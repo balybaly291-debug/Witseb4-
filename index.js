@@ -20,23 +20,9 @@ async function isWarned(sender) {
 
 async function addWarned(sender) {
     try {
+        // TTL = 7 أيام (604800 ثانية)
         await redis.set(`warned:${sender}`, '1', { EX: 604800 });
     } catch (e) { console.log('⚠️ فشل الحفظ في Redis'); }
-}
-
-// --- حذف مع إعادة المحاولة ---
-async function deleteMessage(sock, from, msgKey) {
-    for (let i = 0; i < 3; i++) {
-        try {
-            await sock.sendMessage(from, { delete: msgKey });
-            console.log(`🗑️ تم الحذف بنجاح (محاولة ${i + 1})`);
-            return true;
-        } catch (err) {
-            console.log(`⚠️ فشل الحذف محاولة ${i + 1}: ${err.message}`);
-            await new Promise(r => setTimeout(r, 500));
-        }
-    }
-    return false;
 }
 
 // --- فحص إذا الرابط من فيسبوك أو تيك توك ---
@@ -44,7 +30,7 @@ function isFbOrTiktok(text) {
     return /(facebook\.com|fb\.com|fb\.watch|tiktok\.com|vm\.tiktok\.com)/i.test(text);
 }
 
-// --- فحص إذا الرسالة تحتوي رابط ---
+// --- فحص إذا الرسالة تحتوي رابط عادي (غير فيسبوك وتيك توك) ---
 function hasLink(text) {
     if (isFbOrTiktok(text)) return false;
     const linkRegex = /(https?:\/\/|www\.)[^\s]+|[^\s]+\.(com|net|org|io|ly|me|app|co|gg|tv|ru|uk|de|fr|ar|iq|sa|ae|eg)[^\s]*/gi;
@@ -111,11 +97,22 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify') return;
+    // ✅ cache لمنع معالجة نفس الرسالة مرتين
+    const processedMessages = new Set();
 
+    sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe || !msg.key.remoteJid.endsWith('@g.us')) return;
+
+        // ✅ تجاهل الرسالة إذا عالجناها مسبقاً
+        const msgId = msg.key.id;
+        if (processedMessages.has(msgId)) {
+            console.log(`⏭️ تجاهل رسالة مكررة: ${msgId}`);
+            return;
+        }
+        processedMessages.add(msgId);
+        // تنظيف الـ cache كل 1000 رسالة
+        if (processedMessages.size > 1000) processedMessages.clear();
 
         const from = msg.key.remoteJid;
         const sender = msg.key.participant || msg.key.remoteJid;
@@ -128,11 +125,15 @@ async function startBot() {
         if (type === 'imageMessage') {
             const caption = msg.message.imageMessage?.caption || "";
             const wordCount = countWords(caption);
+
             console.log(`🖼️ صورة من ${sender} - عدد الكلمات: ${wordCount}`);
 
             if (wordCount > 10) {
-                await deleteMessage(sock, from, msg.key);
-                console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
+                try {
+                    await sock.sendMessage(from, { delete: msg.key });
+                    console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
+                } catch (err) { console.log("⚠️ فشل الحذف."); }
+
             } else if (wordCount > 5) {
                 if (oggPath && fs.existsSync(oggPath)) {
                     try {
@@ -154,17 +155,19 @@ async function startBot() {
         const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
         if (isMedia) return;
 
+        // تجاهل إذا مو نص
         const isText = type === 'conversation' || type === 'extendedTextMessage';
         if (!isText) return;
 
+        // تجاهل إذا محتوى فارغ
         if (!content || content.trim().length === 0) return;
 
-        console.log(`📨 رسالة من ${sender}: "${content}"`);
+        console.log(`📨 رسالة من ${sender}: "${content}" | type: ${type}`);
 
         const warned = await isWarned(sender);
 
         if (!warned) {
-            // ✅ شخص جديد → بصمة أولاً ثم الحفظ
+            // ✅ شخص جديد → إرسال البصمة أولاً ثم الحفظ
             console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
 
             if (oggPath && fs.existsSync(oggPath)) {
@@ -181,9 +184,11 @@ async function startBot() {
             await addWarned(sender);
 
         } else {
-            // ✅ شخص محفوظ → حذف فوري مع إعادة المحاولة
+            // ✅ شخص محفوظ → حذف أي رسالة يكتبها بدون استثناء
             console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
-            await deleteMessage(sock, from, msg.key);
+            try {
+                await sock.sendMessage(from, { delete: msg.key });
+            } catch (err) { console.log("⚠️ فشل الحذف - تأكد أن البوت مشرف."); }
         }
     });
 
