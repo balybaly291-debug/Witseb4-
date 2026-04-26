@@ -1,25 +1,55 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, delay } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const { createClient } = require('redis');
 
-// --- نظام الذاكرة للمستخدمين الذين تم تنبيههم ---
-const WARNED_FILE = './warned.json';
-let warnedUsers = new Set();
+// ضبط مسار ffmpeg
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-if (fs.existsSync(WARNED_FILE)) {
-    try {
-        const data = fs.readFileSync(WARNED_FILE);
-        warnedUsers = new Set(JSON.parse(data));
-        console.log(`✅ تم تحميل ذاكرة الصيادين: ${warnedUsers.size} مستخدم.`);
-    } catch (e) { console.log("⚠️ خطأ في قراءة ملف الذاكرة."); }
+// --- اتصال Redis ---
+const redis = createClient({ url: process.env.REDIS_URL });
+redis.on('error', (err) => console.log('⚠️ Redis Error:', err));
+
+// --- دوال الذاكرة عبر Redis ---
+async function isWarned(sender) {
+    const result = await redis.get(`warned:${sender}`);
+    return result !== null;
 }
 
-function saveWarnedUsers() {
-    fs.writeFileSync(WARNED_FILE, JSON.stringify([...warnedUsers]));
+async function addWarned(sender) {
+    await redis.set(`warned:${sender}`, '1');
+}
+
+// --- دالة تحويل MP3 إلى OGG/Opus ---
+function convertToOgg(inputPath) {
+    const outputPath = inputPath.replace('.mp3', '_converted.ogg');
+    return new Promise((resolve, reject) => {
+        if (fs.existsSync(outputPath)) {
+            return resolve(outputPath);
+        }
+        ffmpeg(inputPath)
+            .audioCodec('libopus')
+            .audioBitrate('128k')
+            .format('ogg')
+            .on('end', () => {
+                console.log('✅ تم تحويل الملف الصوتي بنجاح.');
+                resolve(outputPath);
+            })
+            .on('error', (err) => {
+                console.log('⚠️ فشل تحويل الصوت:', err.message);
+                reject(err);
+            })
+            .save(outputPath);
+    });
 }
 
 async function startBot() {
-    // حفظ الجلسة في مجلد لضمان عدم الحاجة للربط في كل مرة
+    // --- الاتصال بـ Redis ---
+    await redis.connect();
+    console.log('✅ تم الاتصال بـ Redis بنجاح!');
+
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
 
@@ -31,73 +61,98 @@ async function startBot() {
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    // --- طلب كود الربط برقمك الخاص ---
+    // --- تحويل الملف الصوتي مرة واحدة عند بدء التشغيل ---
+    let oggPath = null;
+    if (fs.existsSync('./voice.mp3')) {
+        try {
+            oggPath = await convertToOgg('./voice.mp3');
+            console.log(`🎵 الملف الصوتي جاهز: ${oggPath}`);
+        } catch (err) {
+            console.log('⚠️ تعذّر تحويل الملف الصوتي.');
+        }
+    } else {
+        console.log('⚠️ ملف voice.mp3 غير موجود!');
+    }
+
+    // --- طلب كود الربط ---
     if (!sock.authState.creds.registered) {
-        const phoneNumber = "9647877132433"; 
+        const phoneNumber = "9647877132433";
         setTimeout(async () => {
             try {
                 let code = await sock.requestPairingCode(phoneNumber);
                 console.log(`\n\n************************************`);
-                console.log(`✅ كود الربط الجديد الخاص بك هو: ${code}`);
+                console.log(`✅ كود الربط: ${code}`);
                 console.log(`************************************\n\n`);
             } catch (err) {
-                console.log("⚠️ فشل طلب الكود، تأكد من استقرار السيرفر.");
+                console.log("⚠️ فشل طلب الكود.");
             }
-        }, 8000); // انتظر 8 ثوانٍ لضمان استقرار التشغيل
+        }, 8000);
     }
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- معالجة الرسائل الواردة ---
+    // --- معالجة الرسائل ---
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe || !msg.key.remoteJid.endsWith('@g.us')) return;
 
         const from = msg.key.remoteJid;
-        const sender = msg.key.participant || msg.key.remoteJid; 
+        const sender = msg.key.participant || msg.key.remoteJid;
         const type = Object.keys(msg.message)[0];
         const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-        // فحص نوع الرسالة (نص، ميديا، إيموجي)
+        // فحص نوع الرسالة
         const isMedia = ['imageMessage', 'videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
         const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 || content.includes('@');
         const isEmojiOnly = /^[\p{Emoji}\s\p{Punctuation}]+$/u.test(content.trim());
+        const isTextMessage = (type === 'conversation' || type === 'extendedTextMessage') && !isMedia && !hasMention && !isEmojiOnly && content.trim().length > 0;
 
-        // إذا كانت الرسالة نصية فقط (ليست ميديا ولا إيموجي ولا منشن)
-        if ((type === 'conversation' || type === 'extendedTextMessage') && !isMedia && !hasMention && !isEmojiOnly && content.trim().length > 0) {
-            
-            if (!warnedUsers.has(sender)) {
-                // المرة الأولى: نرسل بصمة الصوت ونضيفه للقائمة
-                warnedUsers.add(sender);
-                saveWarnedUsers();
+        if (!isTextMessage) return;
 
-                if (fs.existsSync('./voice.mp3')) {
-                    await sock.sendMessage(from, { 
-                        audio: { url: "./voice.mp3" }, 
-                        mimetype: 'audio/ogg; codecs=opus', 
-                        ptt: true,
-                        contextInfo: { 
-                            mentionedJid: [sender],
-                            quotedMessage: msg.message 
-                        } 
-                    }, { quoted: msg });
-                    console.log(`🎙️ تم إرسال التنبيه الصوتي لـ: ${sender}`);
-                }
-            } else {
-                // المرة الثانية وما بعدها: حذف الرسالة فوراً
+        const warned = await isWarned(sender);
+
+        if (!warned) {
+            // ══════════════════════════════════════════
+            // أول رسالة كتابية → إرسال البصمة + الحفظ في Redis
+            // ══════════════════════════════════════════
+            await addWarned(sender);
+            console.log(`📝 تم حفظ العضو في Redis: ${sender}`);
+
+            if (oggPath && fs.existsSync(oggPath)) {
                 try {
-                    await sock.sendMessage(from, { delete: msg.key });
-                    console.log(`🗑️ تم حذف رسالة مخالف مكرر: ${sender}`);
-                } catch (err) { console.log("⚠️ فشل الحذف (قد لا أكون مشرفاً)."); }
+                    await sock.sendMessage(from, {
+                        audio: fs.readFileSync(oggPath),
+                        mimetype: 'audio/ogg; codecs=opus',
+                        ptt: true,
+                        contextInfo: {
+                            mentionedJid: [sender],
+                            quotedMessage: msg.message
+                        }
+                    }, { quoted: msg });
+                    console.log(`🎙️ تم إرسال البصمة الصوتية لـ: ${sender}`);
+                } catch (err) {
+                    console.log(`⚠️ فشل إرسال الصوت: ${err.message}`);
+                }
+            }
+
+        } else {
+            // ══════════════════════════════════════════
+            // سبق وأخذ البصمة → حذف رسالته فوراً
+            // ══════════════════════════════════════════
+            try {
+                await sock.sendMessage(from, { delete: msg.key });
+                console.log(`🗑️ تم حذف رسالة العضو المحفوظ: ${sender}`);
+            } catch (err) {
+                console.log("⚠️ فشل الحذف (تأكد أن البوت مشرف).");
             }
         }
     });
 
-    // إعادة الاتصال التلقائي
+    // --- إعادة الاتصال التلقائي ---
     sock.ev.on('connection.update', async (up) => {
         const { connection, lastDisconnect } = up;
         if (connection === 'open') {
-            console.log('🦅 صقور العراق: البوت متصل الآن بنجاح!');
+            console.log('🦅 صقور العراق: البوت متصل الآن!');
         }
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== 401;
@@ -109,5 +164,4 @@ async function startBot() {
     });
 }
 
-// تشغيل البوت
 startBot();
