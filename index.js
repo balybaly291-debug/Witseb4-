@@ -141,8 +141,8 @@ async function startBot() {
 
         if (!content || content.trim().length === 0) return;
 
-        // ✅ التاكات مسموحة للجميع
-        const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0;
+        // ✅ التاكات مسموحة للجميع (mentionedJid أو @ في النص)
+        const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 || content.includes('@');
         if (hasMention) {
             console.log(`🔕 تجاهل تاك من: ${sender}`);
             return;
@@ -168,6 +168,13 @@ async function startBot() {
             await addWarned(sender);
 
         } else {
+            // ✅ تجاهل أي رسالة تحتوي رابط
+            const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
+            if (hasAnyLink) {
+                console.log(`🔕 تجاهل رابط من: ${sender}`);
+                return;
+            }
+
             // شخص محفوظ → حذف فوري
             console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
             try {
