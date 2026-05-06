@@ -116,7 +116,7 @@ async function startBot() {
     const app = express();
     app.use(express.json());
 
-    // CORS - ضروري لأن التطبيق HTML يتصل من دومين مختلف
+    // CORS
     app.use((req, res, next) => {
         res.header('Access-Control-Allow-Origin', '*');
         res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -127,7 +127,6 @@ async function startBot() {
 
     const OTP_SECRET = process.env.OTP_SECRET || 'suqoor_iraq_secret_2024';
 
-    // صفحة للتأكد أن السيرفر يعمل
     app.get('/', (req, res) => {
         res.json({ status: '🦅 صقور العراق - OTP Service يعمل', time: new Date().toISOString() });
     });
@@ -135,13 +134,8 @@ async function startBot() {
     // إرسال OTP عبر واتساب
     app.post('/send-otp', async (req, res) => {
         const { phone, secret } = req.body;
-
-        if (secret !== OTP_SECRET) {
-            return res.status(401).json({ success: false, error: 'Unauthorized' });
-        }
-        if (!phone) {
-            return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
-        }
+        if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
+        if (!phone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
 
         const cleanPhone = phone.replace(/[^0-9]/g, '');
         const jid = `${cleanPhone}@s.whatsapp.net`;
@@ -163,30 +157,20 @@ async function startBot() {
     // التحقق من OTP
     app.post('/verify-otp', async (req, res) => {
         const { phone, otp, secret } = req.body;
-
-        if (secret !== OTP_SECRET) {
-            return res.status(401).json({ success: false, error: 'Unauthorized' });
-        }
-        if (!phone || !otp) {
-            return res.status(400).json({ success: false, error: 'رقم الهاتف والرمز مطلوبان' });
-        }
+        if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
+        if (!phone || !otp) return res.status(400).json({ success: false, error: 'رقم الهاتف والرمز مطلوبان' });
 
         const cleanPhone = phone.replace(/[^0-9]/g, '');
         const savedOTP = await getOTP(cleanPhone);
 
-        if (!savedOTP) {
-            return res.status(400).json({ success: false, error: 'الرمز غير موجود أو انتهت صلاحيته' });
-        }
-        if (savedOTP !== otp.toString()) {
-            return res.status(400).json({ success: false, error: 'الرمز غير صحيح' });
-        }
+        if (!savedOTP) return res.status(400).json({ success: false, error: 'الرمز غير موجود أو انتهت صلاحيته' });
+        if (savedOTP !== otp.toString()) return res.status(400).json({ success: false, error: 'الرمز غير صحيح' });
 
         await deleteOTP(cleanPhone);
         console.log(`✅ OTP تم التحقق: ${cleanPhone}`);
         res.json({ success: true, message: 'تم التحقق بنجاح' });
     });
 
-    // Railway يستخدم process.env.PORT تلقائياً
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 OTP API يعمل على port ${PORT}`);
@@ -196,6 +180,18 @@ async function startBot() {
     // cache لمنع معالجة نفس الرسالة مرتين
     // ══════════════════════════════════════════
     const processedMessages = new Set();
+
+    // ══════════════════════════════════════════
+    // قائمة الفيديوهات - أضف فيديوهاتك هنا
+    // ══════════════════════════════════════════
+    const videos = [
+        {
+            name: 'طريقة حجز موعد Uber',
+            url: 'https://k.top4top.io/m_3778lr4560.mp4'
+        },
+        // أضف المزيد هنا:
+        // { name: 'اسم الفيديو', url: 'رابط الفيديو' },
+    ];
 
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type !== 'notify') return;
@@ -260,6 +256,50 @@ async function startBot() {
 
         console.log(`📨 رسالة من ${sender}: "${content}"`);
 
+        // ══════════════════════════════════════════
+        // قائمة الفيديوهات - عند كتابة نقطة .
+        // ══════════════════════════════════════════
+        if (content.trim() === '.') {
+            try {
+                const listText = videos.map((v, i) => `${i + 1}️⃣ ${v.name}`).join('\n');
+                await sock.sendMessage(from, {
+                    text: `📹 *قائمة الفيديوهات:*\n\n${listText}\n\n✏️ *اكتب رقم الفيديو لإرساله*`
+                }, { quoted: msg });
+                await redis.set(`video_menu:${sender}`, JSON.stringify(videos), { EX: 120 });
+                console.log(`📋 تم إرسال قائمة الفيديوهات إلى: ${sender}`);
+            } catch (err) {
+                console.log('⚠️ فشل إرسال القائمة:', err.message);
+            }
+            return;
+        }
+
+        // ══════════════════════════════════════════
+        // معالجة اختيار الفيديو برقم
+        // ══════════════════════════════════════════
+        const videoMenu = await redis.get(`video_menu:${sender}`);
+        if (videoMenu) {
+            const choice = parseInt(content.trim());
+            const menuVideos = JSON.parse(videoMenu);
+            if (!isNaN(choice) && choice >= 1 && choice <= menuVideos.length) {
+                const selected = menuVideos[choice - 1];
+                try {
+                    await sock.sendMessage(from, {
+                        video: { url: selected.url },
+                        caption: `🎬 *${selected.name}*`,
+                        mimetype: 'video/mp4'
+                    }, { quoted: msg });
+                    await redis.del(`video_menu:${sender}`);
+                    console.log(`✅ تم إرسال فيديو: ${selected.name} إلى ${sender}`);
+                } catch (err) {
+                    console.log('⚠️ فشل إرسال الفيديو:', err.message);
+                }
+                return;
+            }
+        }
+
+        // ══════════════════════════════════════════
+        // منطق التحذير والحذف
+        // ══════════════════════════════════════════
         const warned = await isWarned(sender);
 
         if (!warned) {
