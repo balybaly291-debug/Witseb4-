@@ -71,74 +71,6 @@ function convertToOgg(inputPath) {
 // ══════════════════════════════════════════
 // الدالة الرئيسية
 // ══════════════════════════════════════════
-// ══════════════════════════════════════════
-// Express يبدأ فوراً قبل أي شيء (مطلوب من Railway)
-// ══════════════════════════════════════════
-const app = express();
-app.use(express.json());
-
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-});
-
-app.get('/', (req, res) => {
-    res.json({ status: '🦅 صقور العراق - OTP Service يعمل', time: new Date().toISOString() });
-});
-
-const OTP_SECRET = process.env.OTP_SECRET || 'suqoor_iraq_secret_2024';
-
-app.post('/send-otp', async (req, res) => {
-    const { phone, secret } = req.body;
-    if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
-    if (!phone) return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
-    const cleanPhone = phone.replace(/[^0-9]/g, '');
-    const jid = `${cleanPhone}@s.whatsapp.net`;
-    const otp = generateOTP();
-    try {
-        await saveOTP(cleanPhone, otp);
-        await globalSock.sendMessage(jid, {
-            text: `🦅 *صقور العراق*
-
-رمز التحقق الخاص بك:
-
-*${otp}*
-
-⏱️ صالح لمدة 5 دقائق
-🔒 لا تشارك هذا الرمز مع أحد.`
-        });
-        console.log(`✅ OTP أُرسل إلى: ${cleanPhone}`);
-        res.json({ success: true, message: 'OTP أُرسل بنجاح' });
-    } catch (err) {
-        console.log(`⚠️ فشل إرسال OTP: ${err.message}`);
-        res.status(500).json({ success: false, error: 'فشل إرسال الرسالة' });
-    }
-});
-
-app.post('/verify-otp', async (req, res) => {
-    const { phone, otp, secret } = req.body;
-    if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
-    if (!phone || !otp) return res.status(400).json({ success: false, error: 'رقم الهاتف والرمز مطلوبان' });
-    const cleanPhone = phone.replace(/[^0-9]/g, '');
-    const savedOTP = await getOTP(cleanPhone);
-    if (!savedOTP) return res.status(400).json({ success: false, error: 'الرمز غير موجود أو انتهت صلاحيته' });
-    if (savedOTP !== otp.toString()) return res.status(400).json({ success: false, error: 'الرمز غير صحيح' });
-    await deleteOTP(cleanPhone);
-    console.log(`✅ OTP تم التحقق: ${cleanPhone}`);
-    res.json({ success: true, message: 'تم التحقق بنجاح' });
-});
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 OTP API يعمل على port ${PORT}`);
-});
-
-// متغير عام للـ socket
-let globalSock = null;
-
 async function startBot() {
     await redis.connect();
     console.log('✅ Redis متصل!');
@@ -153,7 +85,6 @@ async function startBot() {
         logger: pino({ level: 'silent' }),
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
-    globalSock = sock;
 
     let oggPath = null;
     if (fs.existsSync('./voice.mp3')) {
@@ -179,7 +110,87 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // OTP API يعمل خارج startBot
+    // ══════════════════════════════════════════
+    // Express API - OTP Service
+    // ══════════════════════════════════════════
+    const app = express();
+    app.use(express.json());
+
+    // CORS - ضروري لأن التطبيق HTML يتصل من دومين مختلف
+    app.use((req, res, next) => {
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Headers', 'Content-Type');
+        res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+        if (req.method === 'OPTIONS') return res.sendStatus(200);
+        next();
+    });
+
+    const OTP_SECRET = process.env.OTP_SECRET || 'suqoor_iraq_secret_2024';
+
+    // صفحة للتأكد أن السيرفر يعمل
+    app.get('/', (req, res) => {
+        res.json({ status: '🦅 صقور العراق - OTP Service يعمل', time: new Date().toISOString() });
+    });
+
+    // إرسال OTP عبر واتساب
+    app.post('/send-otp', async (req, res) => {
+        const { phone, secret } = req.body;
+
+        if (secret !== OTP_SECRET) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        if (!phone) {
+            return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
+        }
+
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        const jid = `${cleanPhone}@s.whatsapp.net`;
+        const otp = generateOTP();
+
+        try {
+            await saveOTP(cleanPhone, otp);
+            await sock.sendMessage(jid, {
+                text: `🦅 *صقور العراق*\n\nرمز التحقق الخاص بك:\n\n*${otp}*\n\n⏱️ صالح لمدة 5 دقائق\n🔒 لا تشارك هذا الرمز مع أحد.`
+            });
+            console.log(`✅ OTP أُرسل إلى: ${cleanPhone}`);
+            res.json({ success: true, message: 'OTP أُرسل بنجاح' });
+        } catch (err) {
+            console.log(`⚠️ فشل إرسال OTP إلى ${cleanPhone}: ${err.message}`);
+            res.status(500).json({ success: false, error: 'فشل إرسال الرسالة' });
+        }
+    });
+
+    // التحقق من OTP
+    app.post('/verify-otp', async (req, res) => {
+        const { phone, otp, secret } = req.body;
+
+        if (secret !== OTP_SECRET) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        if (!phone || !otp) {
+            return res.status(400).json({ success: false, error: 'رقم الهاتف والرمز مطلوبان' });
+        }
+
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        const savedOTP = await getOTP(cleanPhone);
+
+        if (!savedOTP) {
+            return res.status(400).json({ success: false, error: 'الرمز غير موجود أو انتهت صلاحيته' });
+        }
+        if (savedOTP !== otp.toString()) {
+            return res.status(400).json({ success: false, error: 'الرمز غير صحيح' });
+        }
+
+        await deleteOTP(cleanPhone);
+        console.log(`✅ OTP تم التحقق: ${cleanPhone}`);
+        res.json({ success: true, message: 'تم التحقق بنجاح' });
+    });
+
+    // Railway يستخدم process.env.PORT تلقائياً
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 OTP API يعمل على port ${PORT}`);
+    });
 
     // ══════════════════════════════════════════
     // cache لمنع معالجة نفس الرسالة مرتين
