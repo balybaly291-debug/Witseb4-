@@ -69,6 +69,33 @@ function convertToOgg(inputPath) {
 }
 
 // ══════════════════════════════════════════
+// القائمة الأولى (نقطة واحدة .) - 9 فيديوهات
+// ══════════════════════════════════════════
+const MENU1_IMAGE = 'https://fastupload.live/do.php?id=7802';
+const menu1Videos = [
+    { id: 1, url: 'https://fastupload.live/do.php?id=7803' },
+    { id: 2, url: 'https://fastupload.live/do.php?id=7804' },
+    { id: 3, url: 'https://fastupload.live/do.php?id=7805' },
+    { id: 4, url: 'https://fastupload.live/do.php?id=7806' },
+    { id: 5, url: 'https://fastupload.live/do.php?id=7810' },
+    { id: 6, url: 'https://fastupload.live/do.php?id=7812' },
+    { id: 7, url: 'https://fastupload.live/do.php?id=7813' },
+    { id: 8, url: 'https://fastupload.live/do.php?id=7814' },
+    { id: 9, url: 'https://fastupload.live/do.php?id=7815' },
+];
+
+// ══════════════════════════════════════════
+// القائمة الثانية (نقطتين ..) - 4 فيديوهات
+// ══════════════════════════════════════════
+const MENU2_IMAGE = 'https://fastupload.live/do.php?id=7816';
+const menu2Videos = [
+    { id: 1, url: 'https://fastupload.live/do.php?id=7817' },
+    { id: 2, url: 'https://fastupload.live/do.php?id=7818' },
+    { id: 3, url: 'https://fastupload.live/do.php?id=7819' },
+    { id: 4, url: 'https://fastupload.live/do.php?id=7820' },
+];
+
+// ══════════════════════════════════════════
 // الدالة الرئيسية
 // ══════════════════════════════════════════
 async function startBot() {
@@ -181,18 +208,6 @@ async function startBot() {
     // ══════════════════════════════════════════
     const processedMessages = new Set();
 
-    // ══════════════════════════════════════════
-    // قائمة الفيديوهات - أضف فيديوهاتك هنا
-    // ══════════════════════════════════════════
-    const videos = [
-        {
-            name: 'طريقة حجز موعد Uber',
-            url: 'https://k.top4top.io/m_3778lr4560.mp4'
-        },
-        // أضف المزيد هنا:
-        // { name: 'اسم الفيديو', url: 'رابط الفيديو' },
-    ];
-
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type !== 'notify') return;
 
@@ -247,54 +262,111 @@ async function startBot() {
 
         if (!content || content.trim().length === 0) return;
 
-        // التاكات مسموحة للجميع
-        const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 || content.includes('@');
-        if (hasMention) {
-            console.log(`🔕 تجاهل تاك من: ${sender}`);
-            return;
-        }
+        // ══════════════════════════════════════════
+        // استخراج التاك الموجَّه (إن وُجد)
+        // ══════════════════════════════════════════
+        const mentionedJids = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
+        const hasMention = mentionedJids.length > 0 || content.includes('@');
 
-        console.log(`📨 رسالة من ${sender}: "${content}"`);
+        // تجاهل التاكات العادية (غير المرتبطة بقوائم الفيديو)
+        // — سنتعامل مع التاك داخل منطق القوائم فقط
+
+        const trimmed = content.trim();
+        console.log(`📨 رسالة من ${sender}: "${trimmed}"`);
 
         // ══════════════════════════════════════════
-        // قائمة الفيديوهات - عند كتابة نقطة .
+        // القائمة الثانية (نقطتين ..) — أولوية أعلى
         // ══════════════════════════════════════════
-        if (content.trim() === '.') {
+        if (trimmed === '..') {
             try {
-                const listText = videos.map((v, i) => `${i + 1}️⃣ ${v.name}`).join('\n');
                 await sock.sendMessage(from, {
-                    text: `📹 *قائمة الفيديوهات:*\n\n${listText}\n\n✏️ *اكتب رقم الفيديو لإرساله*`
+                    image: { url: MENU2_IMAGE },
+                    caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
                 }, { quoted: msg });
-                await redis.set(`video_menu:${sender}`, JSON.stringify(videos), { EX: 120 });
-                console.log(`📋 تم إرسال قائمة الفيديوهات إلى: ${sender}`);
+                await redis.set(`menu2:${sender}`, '1', { EX: 120 });
+                // نحذف القائمة الأولى إن كانت مفعّلة لهذا المستخدم
+                await redis.del(`menu1:${sender}`);
+                console.log(`📋 عرض قائمة 2 لـ: ${sender}`);
             } catch (err) {
-                console.log('⚠️ فشل إرسال القائمة:', err.message);
+                console.log('⚠️ فشل إرسال صورة القائمة 2:', err.message);
             }
             return;
         }
 
         // ══════════════════════════════════════════
-        // معالجة اختيار الفيديو برقم
+        // القائمة الأولى (نقطة واحدة .)
         // ══════════════════════════════════════════
-        const videoMenu = await redis.get(`video_menu:${sender}`);
-        if (videoMenu) {
-            const choice = parseInt(content.trim());
-            const menuVideos = JSON.parse(videoMenu);
-            if (!isNaN(choice) && choice >= 1 && choice <= menuVideos.length) {
-                const selected = menuVideos[choice - 1];
+        if (trimmed === '.') {
+            try {
+                await sock.sendMessage(from, {
+                    image: { url: MENU1_IMAGE },
+                    caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
+                }, { quoted: msg });
+                await redis.set(`menu1:${sender}`, '1', { EX: 120 });
+                // نحذف القائمة الثانية إن كانت مفعّلة لهذا المستخدم
+                await redis.del(`menu2:${sender}`);
+                console.log(`📋 عرض قائمة 1 لـ: ${sender}`);
+            } catch (err) {
+                console.log('⚠️ فشل إرسال صورة القائمة 1:', err.message);
+            }
+            return;
+        }
+
+        // ══════════════════════════════════════════
+        // معالجة اختيار رقم من القوائم
+        // ══════════════════════════════════════════
+        const choice = parseInt(trimmed);
+
+        if (!isNaN(choice) && choice >= 1) {
+
+            // تحديد الهدف: إذا كان في الرسالة تاك → أرسل للمُتاك، وإلا أرسل مع تاك للضاغط
+            const targetJid = hasMention && mentionedJids.length > 0
+                ? mentionedJids[0]
+                : sender;
+
+            // — القائمة الثانية لها أولوية إذا كانت مفعّلة
+            const inMenu2 = await redis.get(`menu2:${sender}`);
+            if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
+                const selected = menu2Videos[choice - 1];
                 try {
                     await sock.sendMessage(from, {
                         video: { url: selected.url },
-                        caption: `🎬 *${selected.name}*`,
-                        mimetype: 'video/mp4'
+                        mimetype: 'video/mp4',
+                        mentions: [targetJid]
                     }, { quoted: msg });
-                    await redis.del(`video_menu:${sender}`);
-                    console.log(`✅ تم إرسال فيديو: ${selected.name} إلى ${sender}`);
+                    await redis.del(`menu2:${sender}`);
+                    console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
                 } catch (err) {
-                    console.log('⚠️ فشل إرسال الفيديو:', err.message);
+                    console.log('⚠️ فشل إرسال فيديو قائمة 2:', err.message);
                 }
                 return;
             }
+
+            // — القائمة الأولى
+            const inMenu1 = await redis.get(`menu1:${sender}`);
+            if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
+                const selected = menu1Videos[choice - 1];
+                try {
+                    await sock.sendMessage(from, {
+                        video: { url: selected.url },
+                        mimetype: 'video/mp4',
+                        mentions: [targetJid]
+                    }, { quoted: msg });
+                    await redis.del(`menu1:${sender}`);
+                    console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
+                } catch (err) {
+                    console.log('⚠️ فشل إرسال فيديو قائمة 1:', err.message);
+                }
+                return;
+            }
+        }
+
+        // ══════════════════════════════════════════
+        // تجاهل التاكات الغير مرتبطة بالقوائم
+        // ══════════════════════════════════════════
+        if (hasMention) {
+            console.log(`🔕 تجاهل تاك من: ${sender}`);
+            return;
         }
 
         // ══════════════════════════════════════════
