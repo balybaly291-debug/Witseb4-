@@ -278,14 +278,20 @@ async function startBot() {
         // القائمة الثانية (نقطتين ..) — أولوية أعلى
         // ══════════════════════════════════════════
         if (trimmed === '..') {
+            // استخراج الشخص المقتبس إن وُجد
+            const quotedParticipant2 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
+            const replyTarget2 = quotedParticipant2 || null;
             try {
+                const sendOpts = replyTarget2
+                    ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget2 }, message: {} } }
+                    : { quoted: msg };
                 await sock.sendMessage(from, {
                     image: { url: MENU2_IMAGE },
                     caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
-                }, { quoted: msg });
-                await redis.set('menu2:' + sender, '1', { EX: 120 });
-                await redis.del('menu1:' + sender);
-                console.log('📋 قائمة 2 لـ: ' + sender);
+                }, sendOpts);
+                await redis.set('menu2:' + from, '1', { EX: 3600 }); // ساعة
+                await redis.del('menu1:' + from); // حذف القائمة الأولى فوراً
+                console.log('📋 قائمة 2 لمجموعة: ' + from);
             } catch (err) {
                 console.log('⚠️ فشل قائمة 2: ' + err.message);
             }
@@ -296,14 +302,20 @@ async function startBot() {
         // القائمة الأولى (نقطة واحدة .)
         // ══════════════════════════════════════════
         if (trimmed === '.') {
+            // استخراج الشخص المقتبس إن وُجد
+            const quotedParticipant1 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
+            const replyTarget1 = quotedParticipant1 || null;
             try {
+                const sendOpts = replyTarget1
+                    ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget1 }, message: {} } }
+                    : { quoted: msg };
                 await sock.sendMessage(from, {
                     image: { url: MENU1_IMAGE },
                     caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
-                }, { quoted: msg });
-                await redis.set('menu1:' + sender, '1', { EX: 120 });
-                await redis.del('menu2:' + sender);
-                console.log('📋 قائمة 1 لـ: ' + sender);
+                }, sendOpts);
+                await redis.set('menu1:' + from, '1', { EX: 3600 }); // ساعة
+                await redis.del('menu2:' + from); // حذف القائمة الثانية فوراً
+                console.log('📋 قائمة 1 لمجموعة: ' + from);
             } catch (err) {
                 console.log('⚠️ فشل قائمة 1: ' + err.message);
             }
@@ -317,22 +329,32 @@ async function startBot() {
 
         if (!isNaN(choice) && choice >= 1) {
 
-            // تحديد الهدف: إذا كان في الرسالة تاك → أرسل للمُتاك، وإلا أرسل مع تاك للضاغط
-            const targetJid = hasMention && mentionedJids.length > 0
-                ? mentionedJids[0]
-                : sender;
+            // الشخص المقتبس في رسالة الرقم (إن وُجد)
+            const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant || null;
 
-            // — القائمة الثانية لها أولوية إذا كانت مفعّلة
-            const inMenu2 = await redis.get(`menu2:${sender}`);
+            // الأولوية: تاك صريح → مقتبس → الضاغط نفسه
+            const targetJid = (hasMention && mentionedJids.length > 0)
+                ? mentionedJids[0]
+                : (quotedParticipant || sender);
+
+            // رسالة الرد: إذا كان مقتبس نرد عليه، وإلا نرد على رسالة الرقم
+            const quotedMsg = quotedParticipant
+                ? { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant }, message: {} }
+                : msg;
+
+            // — القائمة الثانية لها أولوية إذا كانت مفعّلة في المجموعة
+            const inMenu2 = await redis.get('menu2:' + from);
             if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
                 const selected = menu2Videos[choice - 1];
                 try {
+                    const targetNumber = targetJid.replace('@s.whatsapp.net', '');
                     await sock.sendMessage(from, {
                         video: { url: selected.url },
                         mimetype: 'video/mp4',
+                        caption: `@${targetNumber}`,
                         mentions: [targetJid]
-                    }, { quoted: msg });
-                    await redis.del(`menu2:${sender}`);
+                    }, { quoted: quotedMsg });
+                    await redis.del('menu2:' + from);
                     console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
                 } catch (err) {
                     console.log('⚠️ فشل فيديو قائمة 2: ' + err.message);
@@ -341,16 +363,18 @@ async function startBot() {
             }
 
             // — القائمة الأولى
-            const inMenu1 = await redis.get(`menu1:${sender}`);
+            const inMenu1 = await redis.get('menu1:' + from);
             if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
                 const selected = menu1Videos[choice - 1];
                 try {
+                    const targetNumber = targetJid.replace('@s.whatsapp.net', '');
                     await sock.sendMessage(from, {
                         video: { url: selected.url },
                         mimetype: 'video/mp4',
+                        caption: `@${targetNumber}`,
                         mentions: [targetJid]
-                    }, { quoted: msg });
-                    await redis.del(`menu1:${sender}`);
+                    }, { quoted: quotedMsg });
+                    await redis.del('menu1:' + from);
                     console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
                 } catch (err) {
                     console.log('⚠️ فشل فيديو قائمة 1: ' + err.message);
