@@ -303,4 +303,3 @@ async function startBot() {
 }
 
 startBot();
-c
