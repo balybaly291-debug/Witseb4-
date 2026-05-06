@@ -4,10 +4,13 @@ const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { createClient } = require('redis');
+const express = require('express');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// --- اتصال Redis ---
+// ══════════════════════════════════════════
+// اتصال Redis
+// ══════════════════════════════════════════
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.on('error', (err) => console.log('⚠️ Redis Error:', err));
 
@@ -24,13 +27,33 @@ async function addWarned(sender) {
     } catch (e) { console.log('⚠️ فشل الحفظ في Redis'); }
 }
 
-// --- عد الكلمات ---
+// ══════════════════════════════════════════
+// OTP - تخزين في Redis
+// ══════════════════════════════════════════
+function generateOTP() {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+}
+async function saveOTP(phone, otp) {
+    await redis.set(`otp:${phone}`, otp, { EX: 300 }); // 5 دقائق
+}
+async function getOTP(phone) {
+    return await redis.get(`otp:${phone}`);
+}
+async function deleteOTP(phone) {
+    await redis.del(`otp:${phone}`);
+}
+
+// ══════════════════════════════════════════
+// عد الكلمات
+// ══════════════════════════════════════════
 function countWords(text) {
     if (!text || text.trim().length === 0) return 0;
     return text.trim().split(/\s+/).length;
 }
 
-// --- تحويل MP3 إلى OGG ---
+// ══════════════════════════════════════════
+// تحويل MP3 إلى OGG
+// ══════════════════════════════════════════
 function convertToOgg(inputPath) {
     const outputPath = inputPath.replace('.mp3', '_converted.ogg');
     return new Promise((resolve, reject) => {
@@ -45,6 +68,9 @@ function convertToOgg(inputPath) {
     });
 }
 
+// ══════════════════════════════════════════
+// الدالة الرئيسية
+// ══════════════════════════════════════════
 async function startBot() {
     await redis.connect();
     console.log('✅ Redis متصل!');
@@ -84,7 +110,91 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // ══════════════════════════════════════════
+    // Express API - OTP Service
+    // ══════════════════════════════════════════
+    const app = express();
+    app.use(express.json());
+
+    // CORS - ضروري لأن التطبيق HTML يتصل من دومين مختلف
+    app.use((req, res, next) => {
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Headers', 'Content-Type');
+        res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+        if (req.method === 'OPTIONS') return res.sendStatus(200);
+        next();
+    });
+
+    const OTP_SECRET = process.env.OTP_SECRET || 'suqoor_iraq_secret_2024';
+
+    // صفحة للتأكد أن السيرفر يعمل
+    app.get('/', (req, res) => {
+        res.json({ status: '🦅 صقور العراق - OTP Service يعمل', time: new Date().toISOString() });
+    });
+
+    // إرسال OTP عبر واتساب
+    app.post('/send-otp', async (req, res) => {
+        const { phone, secret } = req.body;
+
+        if (secret !== OTP_SECRET) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        if (!phone) {
+            return res.status(400).json({ success: false, error: 'رقم الهاتف مطلوب' });
+        }
+
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        const jid = `${cleanPhone}@s.whatsapp.net`;
+        const otp = generateOTP();
+
+        try {
+            await saveOTP(cleanPhone, otp);
+            await sock.sendMessage(jid, {
+                text: `🦅 *صقور العراق*\n\nرمز التحقق الخاص بك:\n\n*${otp}*\n\n⏱️ صالح لمدة 5 دقائق\n🔒 لا تشارك هذا الرمز مع أحد.`
+            });
+            console.log(`✅ OTP أُرسل إلى: ${cleanPhone}`);
+            res.json({ success: true, message: 'OTP أُرسل بنجاح' });
+        } catch (err) {
+            console.log(`⚠️ فشل إرسال OTP إلى ${cleanPhone}: ${err.message}`);
+            res.status(500).json({ success: false, error: 'فشل إرسال الرسالة' });
+        }
+    });
+
+    // التحقق من OTP
+    app.post('/verify-otp', async (req, res) => {
+        const { phone, otp, secret } = req.body;
+
+        if (secret !== OTP_SECRET) {
+            return res.status(401).json({ success: false, error: 'Unauthorized' });
+        }
+        if (!phone || !otp) {
+            return res.status(400).json({ success: false, error: 'رقم الهاتف والرمز مطلوبان' });
+        }
+
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        const savedOTP = await getOTP(cleanPhone);
+
+        if (!savedOTP) {
+            return res.status(400).json({ success: false, error: 'الرمز غير موجود أو انتهت صلاحيته' });
+        }
+        if (savedOTP !== otp.toString()) {
+            return res.status(400).json({ success: false, error: 'الرمز غير صحيح' });
+        }
+
+        await deleteOTP(cleanPhone);
+        console.log(`✅ OTP تم التحقق: ${cleanPhone}`);
+        res.json({ success: true, message: 'تم التحقق بنجاح' });
+    });
+
+    // Railway يستخدم process.env.PORT تلقائياً
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 OTP API يعمل على port ${PORT}`);
+    });
+
+    // ══════════════════════════════════════════
     // cache لمنع معالجة نفس الرسالة مرتين
+    // ══════════════════════════════════════════
     const processedMessages = new Set();
 
     sock.ev.on('messages.upsert', async (m) => {
@@ -141,7 +251,7 @@ async function startBot() {
 
         if (!content || content.trim().length === 0) return;
 
-        // ✅ التاكات مسموحة للجميع (mentionedJid أو @ في النص)
+        // التاكات مسموحة للجميع
         const hasMention = msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0 || content.includes('@');
         if (hasMention) {
             console.log(`🔕 تجاهل تاك من: ${sender}`);
@@ -153,7 +263,6 @@ async function startBot() {
         const warned = await isWarned(sender);
 
         if (!warned) {
-            // شخص جديد → بصمة أولاً ثم الحفظ
             console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
             if (oggPath && fs.existsSync(oggPath)) {
                 try {
@@ -168,14 +277,11 @@ async function startBot() {
             await addWarned(sender);
 
         } else {
-            // ✅ تجاهل أي رسالة تحتوي رابط
             const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
             if (hasAnyLink) {
                 console.log(`🔕 تجاهل رابط من: ${sender}`);
                 return;
             }
-
-            // شخص محفوظ → حذف فوري
             console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
             try {
                 await sock.sendMessage(from, { delete: msg.key });
