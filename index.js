@@ -5,30 +5,8 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { createClient } = require('redis');
 const express = require('express');
-const https = require('https');
-const http = require('http');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
-
-// ══════════════════════════════════════════
-// تحميل صورة من URL كـ Buffer (يدعم redirect)
-// ══════════════════════════════════════════
-function fetchImageBuffer(url, maxRedirects = 5) {
-    return new Promise((resolve, reject) => {
-        if (maxRedirects === 0) return reject(new Error('Too many redirects'));
-        const lib = url.startsWith('https') ? https : http;
-        lib.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return resolve(fetchImageBuffer(res.headers.location, maxRedirects - 1));
-            }
-            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-            const chunks = [];
-            res.on('data', (chunk) => chunks.push(chunk));
-            res.on('end', () => resolve(Buffer.concat(chunks)));
-            res.on('error', reject);
-        }).on('error', reject);
-    });
-}
 
 // ══════════════════════════════════════════
 // اتصال Redis
@@ -93,28 +71,28 @@ function convertToOgg(inputPath) {
 // ══════════════════════════════════════════
 // القائمة الأولى (نقطة واحدة .) - 9 فيديوهات
 // ══════════════════════════════════════════
-const MENU1_IMAGE = 'https://fastupload.live/do.php?id=7802';
+const MENU1_IMAGE = 'https://c.top4top.io/p_37781yeyc0.jpg';
 const menu1Videos = [
-    { id: 1, url: 'https://fastupload.live/do.php?id=7803' },
-    { id: 2, url: 'https://fastupload.live/do.php?id=7804' },
-    { id: 3, url: 'https://fastupload.live/do.php?id=7805' },
-    { id: 4, url: 'https://fastupload.live/do.php?id=7806' },
-    { id: 5, url: 'https://fastupload.live/do.php?id=7810' },
-    { id: 6, url: 'https://fastupload.live/do.php?id=7812' },
-    { id: 7, url: 'https://fastupload.live/do.php?id=7813' },
-    { id: 8, url: 'https://fastupload.live/do.php?id=7814' },
-    { id: 9, url: 'https://fastupload.live/do.php?id=7815' },
+    { id: 1, url: 'https://g.top4top.io/m_3778hj5380.mp4' },
+    { id: 2, url: 'https://h.top4top.io/m_3778uievg1.mp4' },
+    { id: 3, url: 'https://i.top4top.io/m_37780x2tk2.mp4' },
+    { id: 4, url: 'https://g.top4top.io/m_37782xaku3.mp4' },
+    { id: 5, url: 'https://h.top4top.io/m_37789uhnr4.mp4' },
+    { id: 6, url: 'https://i.top4top.io/m_3778uiqzi5.mp4' },
+    { id: 7, url: 'https://j.top4top.io/m_37787kkgr6.mp4' },
+    { id: 8, url: 'https://k.top4top.io/m_3778ywkrs7.mp4' },
+    { id: 9, url: 'https://l.top4top.io/m_3778ooi3b8.mp4' },
 ];
 
 // ══════════════════════════════════════════
 // القائمة الثانية (نقطتين ..) - 4 فيديوهات
 // ══════════════════════════════════════════
-const MENU2_IMAGE = 'https://fastupload.live/do.php?id=7816';
+const MENU2_IMAGE = 'https://h.top4top.io/p_3778tpspl0.jpg';
 const menu2Videos = [
-    { id: 1, url: 'https://fastupload.live/do.php?id=7817' },
-    { id: 2, url: 'https://fastupload.live/do.php?id=7818' },
-    { id: 3, url: 'https://fastupload.live/do.php?id=7819' },
-    { id: 4, url: 'https://fastupload.live/do.php?id=7820' },
+    { id: 1, url: 'https://d.top4top.io/m_37780m36g0.mp4' },
+    { id: 2, url: 'https://e.top4top.io/m_3778qeanq1.mp4' },
+    { id: 3, url: 'https://f.top4top.io/m_37783am272.mp4' },
+    { id: 4, url: 'https://g.top4top.io/m_3778ya3nw3.mp4' },
 ];
 
 // ══════════════════════════════════════════
@@ -301,23 +279,15 @@ async function startBot() {
         // ══════════════════════════════════════════
         if (trimmed === '..') {
             try {
-                let imagePayload;
-                try {
-                    const imgBuffer = await fetchImageBuffer(MENU2_IMAGE);
-                    imagePayload = { image: imgBuffer };
-                    console.log('🖼️ buffer قائمة 2: ' + imgBuffer.length + ' bytes');
-                } catch (bufErr) {
-                    console.log('buffer فشل، نجرب URL مباشر: ' + bufErr.message);
-                    imagePayload = { image: { url: MENU2_IMAGE } };
-                }
-                await sock.sendMessage(from, Object.assign({}, imagePayload, {
-                    caption: 'اكتب رقم من 1 الى 4 لارسال الفيديو'
-                }), { quoted: msg });
+                await sock.sendMessage(from, {
+                    image: { url: MENU2_IMAGE },
+                    caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
+                }, { quoted: msg });
                 await redis.set('menu2:' + sender, '1', { EX: 120 });
                 await redis.del('menu1:' + sender);
-                console.log('قائمة 2 لـ: ' + sender);
+                console.log('📋 قائمة 2 لـ: ' + sender);
             } catch (err) {
-                console.log('فشل كلي قائمة 2: ' + err.message);
+                console.log('⚠️ فشل قائمة 2: ' + err.message);
             }
             return;
         }
@@ -327,23 +297,15 @@ async function startBot() {
         // ══════════════════════════════════════════
         if (trimmed === '.') {
             try {
-                let imagePayload;
-                try {
-                    const imgBuffer = await fetchImageBuffer(MENU1_IMAGE);
-                    imagePayload = { image: imgBuffer };
-                    console.log('🖼️ buffer قائمة 1: ' + imgBuffer.length + ' bytes');
-                } catch (bufErr) {
-                    console.log('buffer فشل، نجرب URL مباشر: ' + bufErr.message);
-                    imagePayload = { image: { url: MENU1_IMAGE } };
-                }
-                await sock.sendMessage(from, Object.assign({}, imagePayload, {
-                    caption: 'اكتب رقم من 1 الى 9 لارسال الفيديو'
-                }), { quoted: msg });
+                await sock.sendMessage(from, {
+                    image: { url: MENU1_IMAGE },
+                    caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
+                }, { quoted: msg });
                 await redis.set('menu1:' + sender, '1', { EX: 120 });
                 await redis.del('menu2:' + sender);
-                console.log('قائمة 1 لـ: ' + sender);
+                console.log('📋 قائمة 1 لـ: ' + sender);
             } catch (err) {
-                console.log('فشل كلي قائمة 1: ' + err.message);
+                console.log('⚠️ فشل قائمة 1: ' + err.message);
             }
             return;
         }
@@ -365,23 +327,15 @@ async function startBot() {
             if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
                 const selected = menu2Videos[choice - 1];
                 try {
-                    let videoPayload;
-                    try {
-                        const vidBuffer = await fetchImageBuffer(selected.url);
-                        videoPayload = { video: vidBuffer };
-                        console.log('📹 buffer فيديو قائمة 2: ' + vidBuffer.length + ' bytes');
-                    } catch (bufErr) {
-                        console.log('buffer فيديو فشل، URL مباشر: ' + bufErr.message);
-                        videoPayload = { video: { url: selected.url } };
-                    }
-                    await sock.sendMessage(from, Object.assign({}, videoPayload, {
+                    await sock.sendMessage(from, {
+                        video: { url: selected.url },
                         mimetype: 'video/mp4',
                         mentions: [targetJid]
-                    }), { quoted: msg });
+                    }, { quoted: msg });
                     await redis.del(`menu2:${sender}`);
                     console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
                 } catch (err) {
-                    console.log('⚠️ فشل إرسال فيديو قائمة 2:', err.message);
+                    console.log('⚠️ فشل فيديو قائمة 2: ' + err.message);
                 }
                 return;
             }
@@ -391,23 +345,15 @@ async function startBot() {
             if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
                 const selected = menu1Videos[choice - 1];
                 try {
-                    let videoPayload;
-                    try {
-                        const vidBuffer = await fetchImageBuffer(selected.url);
-                        videoPayload = { video: vidBuffer };
-                        console.log('📹 buffer فيديو قائمة 1: ' + vidBuffer.length + ' bytes');
-                    } catch (bufErr) {
-                        console.log('buffer فيديو فشل، URL مباشر: ' + bufErr.message);
-                        videoPayload = { video: { url: selected.url } };
-                    }
-                    await sock.sendMessage(from, Object.assign({}, videoPayload, {
+                    await sock.sendMessage(from, {
+                        video: { url: selected.url },
                         mimetype: 'video/mp4',
                         mentions: [targetJid]
-                    }), { quoted: msg });
+                    }, { quoted: msg });
                     await redis.del(`menu1:${sender}`);
                     console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
                 } catch (err) {
-                    console.log('⚠️ فشل إرسال فيديو قائمة 1:', err.message);
+                    console.log('⚠️ فشل فيديو قائمة 1: ' + err.message);
                 }
                 return;
             }
