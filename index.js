@@ -11,6 +11,70 @@ const express = require('express');
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // ══════════════════════════════════════════
+// تحميل yt-dlp تلقائياً إذا لم يكن مثبتاً
+// ══════════════════════════════════════════
+const https = require('https');
+const YT_DLP_LOCAL = path.join(__dirname, 'yt-dlp');
+let YT_DLP_BIN = 'yt-dlp'; // يستخدم PATH أولاً
+
+async function downloadBinary(url, dest) {
+    return new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(dest);
+        const request = (reqUrl) => {
+            https.get(reqUrl, (res) => {
+                if (res.statusCode === 301 || res.statusCode === 302) {
+                    return request(res.headers.location);
+                }
+                if (res.statusCode !== 200) {
+                    return reject(new Error(`HTTP ${res.statusCode}`));
+                }
+                res.pipe(file);
+                file.on('finish', () => file.close(resolve));
+            }).on('error', reject);
+        };
+        request(url);
+    });
+}
+
+async function ensureYtDlp() {
+    // تحقق من وجود yt-dlp في PATH
+    try {
+        await new Promise((resolve, reject) => {
+            execFile('yt-dlp', ['--version'], { timeout: 8000 }, (err) => err ? reject(err) : resolve());
+        });
+        console.log('✅ yt-dlp موجود في PATH');
+        YT_DLP_BIN = 'yt-dlp';
+        return;
+    } catch (_) {}
+
+    // تحقق من الملف المحلي
+    if (fs.existsSync(YT_DLP_LOCAL)) {
+        try {
+            await new Promise((resolve, reject) => {
+                execFile(YT_DLP_LOCAL, ['--version'], { timeout: 8000 }, (err) => err ? reject(err) : resolve());
+            });
+            console.log('✅ yt-dlp موجود محلياً');
+            YT_DLP_BIN = YT_DLP_LOCAL;
+            return;
+        } catch (_) {
+            fs.unlinkSync(YT_DLP_LOCAL);
+        }
+    }
+
+    // تحميل yt-dlp من GitHub
+    console.log('⬇️ yt-dlp غير موجود، جاري التحميل من GitHub...');
+    const dlUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+    try {
+        await downloadBinary(dlUrl, YT_DLP_LOCAL);
+        fs.chmodSync(YT_DLP_LOCAL, '755');
+        YT_DLP_BIN = YT_DLP_LOCAL;
+        console.log('✅ تم تحميل yt-dlp بنجاح!');
+    } catch (err) {
+        console.log(`⚠️ فشل تحميل yt-dlp: ${err.message}`);
+    }
+}
+
+// ══════════════════════════════════════════
 // اتصال Redis
 // ══════════════════════════════════════════
 const redis = createClient({ url: process.env.REDIS_URL });
@@ -198,9 +262,9 @@ function downloadVideo(url) {
             url
         ];
 
-        console.log(`🔄 [yt-dlp] بدء التحميل: ${url}`);
+        console.log(`🔄 [yt-dlp] بدء التحميل (${YT_DLP_BIN}): ${url}`);
 
-        execFile('yt-dlp', args, { timeout: 180000 }, (error, stdout, stderr) => {
+        execFile(YT_DLP_BIN, args, { timeout: 180000 }, (error, stdout, stderr) => {
             if (error) {
                 console.log(`⚠️ [yt-dlp] خطأ: ${error.message}`);
                 if (stderr) console.log(`⚠️ [yt-dlp] stderr: ${stderr}`);
@@ -357,6 +421,9 @@ async function handlePrivateMessage(sock, msg, from) {
 async function startBot() {
     await redis.connect();
     console.log('✅ Redis متصل!');
+
+    // تأكد من وجود yt-dlp وحمّله تلقائياً إذا لزم
+    await ensureYtDlp();
 
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
