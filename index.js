@@ -274,25 +274,32 @@ async function handlePrivateMessage(sock, msg, from) {
 
         console.log(`📩 [خاص] من: ${from} | نوع: ${msgType} | نص: "${text}"`);
 
+        // تجاهل الأنواع التي لا تحتاج رد (ستيكر، صوت، فيديو مرسل، بروتوكول)
+        const silentTypes = ['stickerMessage', 'audioMessage', 'protocolMessage', 'reactionMessage', 'pollUpdateMessage'];
+        if (silentTypes.includes(msgType)) {
+            console.log(`🔕 [خاص] نوع صامت: ${msgType}`);
+            return;
+        }
+
         // ── استخراج الرابط: أولاً مباشرة من الكائن، ثم من النص ──
         const videoUrl = getUrlFromMessage(msg);
+        console.log(`🔗 [خاص] رابط مكتشف: ${videoUrl || 'لا يوجد'}`);
 
         if (!videoUrl) {
-            console.log(`ℹ️ [خاص] لا يوجد رابط.`);
-            // إرسال رسالة مساعدة فقط إذا كان هناك نص (لتجنب الرد على الصور والستيكرات)
-            if (text && text.trim().length > 0) {
-                try {
-                    await sock.sendMessage(from, {
-                        text: `🦅 *أهلاً بك في خدمة التحميل*\n\nأرسل لي رابط الفيديو من:\n• يوتيوب 🎬\n• تيكتوك 🎵\n• انستقرام 📸\n• فيسبوك 👍\n• وغيرها...\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-                    });
-                } catch (e) {
-                    console.log(`⚠️ [خاص] فشل إرسال رسالة المساعدة: ${e.message}`);
-                }
+            // لا يوجد رابط → رسالة مساعدة دائماً (حتى لو النص فارغ)
+            console.log(`ℹ️ [خاص] لا يوجد رابط، إرسال رسالة مساعدة.`);
+            try {
+                await sock.sendMessage(from, {
+                    text: `🦅 *أهلاً بك في خدمة التحميل*\n\nأرسل لي رابط الفيديو من:\n• يوتيوب 🎬\n• تيكتوك 🎵\n• انستقرام 📸\n• فيسبوك 👍\n• وغيرها...\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                });
+                console.log(`✅ [خاص] تم إرسال رسالة المساعدة`);
+            } catch (e) {
+                console.log(`⚠️ [خاص] فشل إرسال رسالة المساعدة: ${e.message}`);
             }
             return;
         }
 
-        console.log(`🎬 [خاص] رابط مكتشف: ${videoUrl}`);
+        console.log(`🎬 [خاص] جاري المعالجة: ${videoUrl}`);
 
         // رسالة الانتظار
         try {
@@ -459,9 +466,22 @@ async function startBot() {
     // ══════════════════════════════════════════
     sock.ev.on('messages.upsert', async (m) => {
         try {
-            if (m.type !== 'notify') return;
+            // تسجيل كل حدث وارد لمساعدة التشخيص
+            console.log(`🔍 [RAW] type: ${m.type} | count: ${m.messages?.length}`);
+
+            // قبلاً كان يُرفض أي نوع غير 'notify' - أُزلنا هذا الفلتر
+            // لأن رسائل الخاص قد تصل بنوع 'append' في بعض إصدارات Baileys
+            if (!m.messages || m.messages.length === 0) return;
 
             const msg = m.messages[0];
+
+            // تسجيل تفاصيل الرسالة الخام
+            if (msg) {
+                const rawFrom = msg.key?.remoteJid || 'unknown';
+                const rawType = Object.keys(msg.message || {})[0] || 'none';
+                console.log(`🔍 [RAW] from: ${rawFrom} | msgType: ${rawType} | fromMe: ${msg.key?.fromMe}`);
+            }
+
             if (!msg || !msg.message) return;
             if (msg.key.fromMe) return;
 
