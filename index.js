@@ -71,14 +71,11 @@ function convertToOgg(inputPath) {
 }
 
 // ══════════════════════════════════════════
-// ⚡ فك تغليف الرسائل المتداخلة في Baileys
-// (ephemeral, viewOnce, document with caption, إلخ)
+// فك تغليف الرسائل المتداخلة في Baileys
 // ══════════════════════════════════════════
 function unwrapMessage(msg) {
     let m = msg.message;
     if (!m) return null;
-
-    // فك التغليف التلقائي للأنواع المتداخلة
     const wrappers = [
         'ephemeralMessage',
         'viewOnceMessage',
@@ -86,27 +83,38 @@ function unwrapMessage(msg) {
         'viewOnceMessageV2Extension',
         'documentWithCaptionMessage',
         'editedMessage',
-        'protocolMessage',
     ];
-
     for (const wrapper of wrappers) {
         if (m[wrapper]?.message) {
             m = m[wrapper].message;
         }
     }
-
     return m;
 }
 
 // ══════════════════════════════════════════
-// ⚡ استخراج المحتوى النصي من أي نوع رسالة
+// استخراج الرابط مباشرة من كائن الرسالة
+// (يعمل حتى مع معاينات الروابط)
+// ══════════════════════════════════════════
+function extractDirectUrl(msg) {
+    const m = unwrapMessage(msg);
+    if (!m) return null;
+
+    // الأولوية: matchedText و canonicalUrl من رسائل الروابط
+    if (m.extendedTextMessage?.matchedText) return m.extendedTextMessage.matchedText;
+    if (m.extendedTextMessage?.canonicalUrl) return m.extendedTextMessage.canonicalUrl;
+
+    return null;
+}
+
+// ══════════════════════════════════════════
+// استخراج النص من أي نوع رسالة
 // ══════════════════════════════════════════
 function extractText(msg) {
     const m = unwrapMessage(msg);
     if (!m) return '';
 
-    // نصوص مباشرة
-    const direct =
+    return (
         m.conversation ||
         m.extendedTextMessage?.text ||
         m.imageMessage?.caption ||
@@ -116,24 +124,16 @@ function extractText(msg) {
         m.buttonsResponseMessage?.selectedDisplayText ||
         m.listResponseMessage?.singleSelectReply?.selectedRowId ||
         m.templateButtonReplyMessage?.selectedDisplayText ||
-        '';
-
-    if (direct) return direct;
-
-    // fallback: matchedText من رسائل الروابط
-    const matched = m.extendedTextMessage?.matchedText || '';
-    if (matched) return matched;
-
-    return '';
+        ''
+    );
 }
 
 // ══════════════════════════════════════════
-// ⚡ كشف أي رابط في النص (يوتيوب، تيكتوك، انستقرام، فيسبوك، وأي رابط آخر)
+// كشف أي رابط في النص
 // ══════════════════════════════════════════
 function detectVideoUrl(text) {
     if (!text) return null;
 
-    // أولاً: منصات معروفة بالترتيب
     const knownPatterns = [
         /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.watch|fb\.com)\/\S+/i,
         /https?:\/\/(?:www\.)?(?:tiktok\.com|vm\.tiktok\.com)\/@?\S+/i,
@@ -153,9 +153,24 @@ function detectVideoUrl(text) {
         if (match) return match[0].replace(/[)>\]"',]+$/, '');
     }
 
-    // ثانياً: أي رابط عام
     const generalMatch = text.match(/https?:\/\/[^\s]+/i);
     if (generalMatch) return generalMatch[0].replace(/[)>\]"',]+$/, '');
+
+    return null;
+}
+
+// ══════════════════════════════════════════
+// دالة موحدة: استخراج الرابط من الرسالة
+// تجمع بين الطريقتين المباشرة والنصية
+// ══════════════════════════════════════════
+function getUrlFromMessage(msg) {
+    // أولاً: محاولة استخراج مباشر من كائن الرسالة (matchedText / canonicalUrl)
+    const directUrl = extractDirectUrl(msg);
+    if (directUrl) return directUrl;
+
+    // ثانياً: استخراج من النص
+    const text = extractText(msg);
+    if (text) return detectVideoUrl(text);
 
     return null;
 }
@@ -183,18 +198,15 @@ function downloadVideo(url) {
             url
         ];
 
-        console.log(`🔄 بدء التحميل: ${url}`);
+        console.log(`🔄 [yt-dlp] بدء التحميل: ${url}`);
 
         execFile('yt-dlp', args, { timeout: 180000 }, (error, stdout, stderr) => {
             if (error) {
-                console.log(`⚠️ yt-dlp خطأ: ${error.message}`);
-                if (stderr) console.log(`⚠️ yt-dlp stderr: ${stderr}`);
+                console.log(`⚠️ [yt-dlp] خطأ: ${error.message}`);
+                if (stderr) console.log(`⚠️ [yt-dlp] stderr: ${stderr}`);
                 return reject(new Error(`فشل yt-dlp: ${error.message}`));
             }
 
-            console.log(`✅ yt-dlp انتهى. البحث عن الملف...`);
-
-            // البحث عن الملف المُنشأ
             const downloadsDir = './downloads';
             try {
                 const files = fs.readdirSync(downloadsDir)
@@ -207,7 +219,7 @@ function downloadVideo(url) {
 
                 if (files.length > 0) {
                     const latestFile = path.join(downloadsDir, files[0].name);
-                    console.log(`✅ ملف الفيديو: ${latestFile}`);
+                    console.log(`✅ [yt-dlp] ملف الفيديو: ${latestFile}`);
                     resolve(latestFile);
                 } else {
                     reject(new Error('الملف لم يُنشأ بعد التحميل'));
@@ -219,7 +231,6 @@ function downloadVideo(url) {
     });
 }
 
-// حذف الملف المؤقت بعد الإرسال
 function deleteFile(filePath) {
     try {
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -252,6 +263,86 @@ const menu2Videos = [
     { id: 3, url: 'https://f.top4top.io/m_37783am272.mp4' },
     { id: 4, url: 'https://g.top4top.io/m_3778ya3nw3.mp4' },
 ];
+
+// ══════════════════════════════════════════
+// 📩 معالج رسائل الخاص - ميزة التحميل فقط
+// ══════════════════════════════════════════
+async function handlePrivateMessage(sock, msg, from) {
+    try {
+        const msgType = Object.keys(msg.message || {})[0] || 'unknown';
+        const text = extractText(msg);
+
+        console.log(`📩 [خاص] من: ${from} | نوع: ${msgType} | نص: "${text}"`);
+
+        // ── استخراج الرابط: أولاً مباشرة من الكائن، ثم من النص ──
+        const videoUrl = getUrlFromMessage(msg);
+
+        if (!videoUrl) {
+            console.log(`ℹ️ [خاص] لا يوجد رابط.`);
+            // إرسال رسالة مساعدة فقط إذا كان هناك نص (لتجنب الرد على الصور والستيكرات)
+            if (text && text.trim().length > 0) {
+                try {
+                    await sock.sendMessage(from, {
+                        text: `🦅 *أهلاً بك في خدمة التحميل*\n\nأرسل لي رابط الفيديو من:\n• يوتيوب 🎬\n• تيكتوك 🎵\n• انستقرام 📸\n• فيسبوك 👍\n• وغيرها...\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                    });
+                } catch (e) {
+                    console.log(`⚠️ [خاص] فشل إرسال رسالة المساعدة: ${e.message}`);
+                }
+            }
+            return;
+        }
+
+        console.log(`🎬 [خاص] رابط مكتشف: ${videoUrl}`);
+
+        // رسالة الانتظار
+        try {
+            await sock.sendMessage(from, {
+                text: `🦅 *أهلاً وسهلاً بكم بميزة التحميل المقدمة من صقور العراق* 🦅\n\n⏳ جاري تحميل الفيديو...\n🔗 ${videoUrl}\n\n🙏 شكراً لصبركم\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+            });
+        } catch (e) {
+            console.log(`⚠️ [خاص] فشل إرسال رسالة الانتظار: ${e.message}`);
+        }
+
+        let videoPath = null;
+        try {
+            videoPath = await downloadVideo(videoUrl);
+            const stats = fs.statSync(videoPath);
+            const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+            console.log(`📦 [خاص] حجم الفيديو: ${fileSizeMB} MB`);
+
+            if (stats.size > 64 * 1024 * 1024) {
+                await sock.sendMessage(from, {
+                    text: `⚠️ *الفيديو كبير جداً (${fileSizeMB} MB)*\n\nواتساب لا يقبل ملفات أكبر من 64MB.\n\nحاول رابطاً لفيديو أقصر.\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                });
+                return;
+            }
+
+            const videoBuffer = fs.readFileSync(videoPath);
+            await sock.sendMessage(from, {
+                video: videoBuffer,
+                mimetype: 'video/mp4',
+                caption: `✅ *تم التحميل بنجاح* 🦅\n_صقور العراق - ورشة الصقور للتصميم والبرمجة_`
+            });
+
+            console.log(`✅ [خاص] تم إرسال الفيديو إلى: ${from}`);
+
+        } catch (dlErr) {
+            console.log(`⚠️ [خاص] فشل التحميل: ${dlErr.message}`);
+            try {
+                await sock.sendMessage(from, {
+                    text: `⚠️ *عذراً، لم يتمكن البوت من تحميل الفيديو*\n\nقد يكون السبب:\n• الفيديو خاص أو محذوف\n• الرابط غير صحيح أو منتهي\n• الفيديو طويل جداً\n• المنصة غير مدعومة\n\n🔗 الرابط: ${videoUrl}\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                });
+            } catch (e2) {
+                console.log(`⚠️ [خاص] فشل إرسال رسالة الخطأ: ${e2.message}`);
+            }
+        } finally {
+            if (videoPath) deleteFile(videoPath);
+        }
+
+    } catch (err) {
+        console.log(`⚠️ [خاص] خطأ غير متوقع: ${err.message}`);
+    }
+}
 
 // ══════════════════════════════════════════
 // الدالة الرئيسية
@@ -371,8 +462,6 @@ async function startBot() {
             if (m.type !== 'notify') return;
 
             const msg = m.messages[0];
-
-            // تجاهل الرسائل الفارغة أو المُرسلة من البوت نفسه
             if (!msg || !msg.message) return;
             if (msg.key.fromMe) return;
 
@@ -387,24 +476,19 @@ async function startBot() {
             const isPrivate = from.endsWith('@s.whatsapp.net');
             const isGroup = from.endsWith('@g.us');
 
-            // ══════════════════════════════════════════
-            // 📩 رسائل الخاص - ميزة تحميل الفيديو فقط
-            // ══════════════════════════════════════════
+            // ── الخاص: ميزة التحميل فقط ──
             if (isPrivate) {
                 await handlePrivateMessage(sock, msg, from);
                 return;
             }
 
-            // ══════════════════════════════════════════
-            // 👥 رسائل المجموعات - المنطق الأصلي
-            // ══════════════════════════════════════════
+            // ── المجموعات: المنطق الأصلي ──
             if (!isGroup) return;
 
             const sender = msg.key.participant || msg.key.remoteJid;
             const type = Object.keys(msg.message)[0];
             const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-            // معالجة الصور (imageMessage)
             if (type === 'imageMessage') {
                 const caption = msg.message.imageMessage?.caption || "";
                 const wordCount = countWords(caption);
@@ -422,14 +506,12 @@ async function startBot() {
                                 mimetype: 'audio/ogg; codecs=opus',
                                 ptt: true,
                             }, { quoted: msg });
-                            console.log(`🎙️ بصمة صوتية لصورة (+5 كلمة) من: ${sender}`);
                         } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
                     }
                 }
                 return;
             }
 
-            // معالجة الرسائل النصية
             const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
             if (isMedia) return;
 
@@ -440,17 +522,14 @@ async function startBot() {
 
             const mentionedJids = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
             const hasMention = mentionedJids.length > 0 || content.includes('@');
-
             const trimmed = content.trim();
             console.log(`📨 رسالة من ${sender}: "${trimmed}"`);
 
-            // القائمة الثانية (نقطتين ..)
             if (trimmed === '..') {
                 const quotedParticipant2 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-                const replyTarget2 = quotedParticipant2 || null;
                 try {
-                    const sendOpts = replyTarget2
-                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget2 }, message: {} } }
+                    const sendOpts = quotedParticipant2
+                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant2 }, message: {} } }
                         : { quoted: msg };
                     await sock.sendMessage(from, {
                         image: { url: MENU2_IMAGE },
@@ -459,19 +538,15 @@ async function startBot() {
                     await redis.set('menu2:' + from, '1', { EX: 3600 });
                     await redis.del('menu1:' + from);
                     console.log('📋 قائمة 2 لمجموعة: ' + from);
-                } catch (err) {
-                    console.log('⚠️ فشل قائمة 2: ' + err.message);
-                }
+                } catch (err) { console.log('⚠️ فشل قائمة 2: ' + err.message); }
                 return;
             }
 
-            // القائمة الأولى (نقطة واحدة .)
             if (trimmed === '.') {
                 const quotedParticipant1 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-                const replyTarget1 = quotedParticipant1 || null;
                 try {
-                    const sendOpts = replyTarget1
-                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget1 }, message: {} } }
+                    const sendOpts = quotedParticipant1
+                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant1 }, message: {} } }
                         : { quoted: msg };
                     await sock.sendMessage(from, {
                         image: { url: MENU1_IMAGE },
@@ -480,15 +555,11 @@ async function startBot() {
                     await redis.set('menu1:' + from, '1', { EX: 3600 });
                     await redis.del('menu2:' + from);
                     console.log('📋 قائمة 1 لمجموعة: ' + from);
-                } catch (err) {
-                    console.log('⚠️ فشل قائمة 1: ' + err.message);
-                }
+                } catch (err) { console.log('⚠️ فشل قائمة 1: ' + err.message); }
                 return;
             }
 
-            // معالجة اختيار رقم من القوائم
             const choice = parseInt(trimmed);
-
             if (!isNaN(choice) && choice >= 1) {
                 const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant || null;
                 const targetJid = (hasMention && mentionedJids.length > 0)
@@ -511,9 +582,7 @@ async function startBot() {
                         }, { quoted: quotedMsg });
                         await redis.del('menu2:' + from);
                         console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
-                    } catch (err) {
-                        console.log('⚠️ فشل فيديو قائمة 2: ' + err.message);
-                    }
+                    } catch (err) { console.log('⚠️ فشل فيديو قائمة 2: ' + err.message); }
                     return;
                 }
 
@@ -530,22 +599,17 @@ async function startBot() {
                         }, { quoted: quotedMsg });
                         await redis.del('menu1:' + from);
                         console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
-                    } catch (err) {
-                        console.log('⚠️ فشل فيديو قائمة 1: ' + err.message);
-                    }
+                    } catch (err) { console.log('⚠️ فشل فيديو قائمة 1: ' + err.message); }
                     return;
                 }
             }
 
-            // تجاهل التاكات الغير مرتبطة بالقوائم
             if (hasMention) {
                 console.log(`🔕 تجاهل تاك من: ${sender}`);
                 return;
             }
 
-            // منطق التحذير والحذف
             const warned = await isWarned(sender);
-
             if (!warned) {
                 console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
                 if (oggPath && fs.existsSync(oggPath)) {
@@ -559,7 +623,6 @@ async function startBot() {
                     } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
                 }
                 await addWarned(sender);
-
             } else {
                 const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
                 if (hasAnyLink) {
@@ -588,95 +651,6 @@ async function startBot() {
             }
         }
     });
-}
-
-// ══════════════════════════════════════════
-// 📩 معالج رسائل الخاص - ميزة التحميل
-// ══════════════════════════════════════════
-async function handlePrivateMessage(sock, msg, from) {
-    try {
-        // استخراج النص من أي نوع رسالة (مع دعم الرسائل المتداخلة)
-        const content = extractText(msg);
-        const msgType = Object.keys(msg.message || {})[0] || 'unknown';
-
-        console.log(`📩 [خاص] من: ${from} | نوع: ${msgType} | نص: "${content}"`);
-
-        // إذا لم يكن هناك نص، لا نرد بشيء (رسائل صور بدون كابشن، استيكرات، إلخ)
-        if (!content || content.trim().length === 0) {
-            console.log(`🔕 [خاص] رسالة بدون نص، تجاهل.`);
-            return;
-        }
-
-        // كشف الرابط في النص
-        const videoUrl = detectVideoUrl(content.trim());
-
-        if (!videoUrl) {
-            // لا يوجد رابط - إرسال رسالة ترحيب/مساعدة
-            console.log(`ℹ️ [خاص] لا يوجد رابط في الرسالة من: ${from}`);
-            try {
-                await sock.sendMessage(from, {
-                    text: `🦅 *أهلاً بك في خدمة التحميل*\n\nأرسل لي رابط الفيديو من:\n• يوتيوب 🎬\n• تيكتوك 🎵\n• انستقرام 📸\n• فيسبوك 👍\n• وغيرها...\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-                });
-            } catch (sendErr) {
-                console.log(`⚠️ [خاص] فشل إرسال رسالة الترحيب: ${sendErr.message}`);
-            }
-            return;
-        }
-
-        console.log(`🎬 [خاص] طلب تحميل من ${from}: ${videoUrl}`);
-
-        // إرسال رسالة الانتظار أولاً
-        try {
-            await sock.sendMessage(from, {
-                text: `🦅 *أهلاً وسهلاً بكم بميزة التحميل المقدمة من صقور العراق* 🦅\n\n⏳ جاري تحميل الفيديو...\n🔗 ${videoUrl}\n\n🙏 شكراً لصبركم\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-            });
-            console.log(`📤 [خاص] تم إرسال رسالة الانتظار إلى: ${from}`);
-        } catch (waitErr) {
-            console.log(`⚠️ [خاص] فشل إرسال رسالة الانتظار: ${waitErr.message}`);
-            // نكمل المحاولة حتى لو فشلت رسالة الانتظار
-        }
-
-        let videoPath = null;
-        try {
-            videoPath = await downloadVideo(videoUrl);
-            const stats = fs.statSync(videoPath);
-            const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-            console.log(`📦 [خاص] حجم الفيديو: ${fileSizeMB} MB`);
-
-            // واتساب يقبل حتى 64MB
-            if (stats.size > 64 * 1024 * 1024) {
-                await sock.sendMessage(from, {
-                    text: `⚠️ *الفيديو كبير جداً (${fileSizeMB} MB)*\n\nواتساب لا يقبل ملفات أكبر من 64MB.\n\nحاول رابطاً لفيديو أقصر.\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-                });
-                return;
-            }
-
-            const videoBuffer = fs.readFileSync(videoPath);
-
-            await sock.sendMessage(from, {
-                video: videoBuffer,
-                mimetype: 'video/mp4',
-                caption: `✅ *تم التحميل بنجاح* 🦅\n_صقور العراق - ورشة الصقور للتصميم والبرمجة_`
-            });
-
-            console.log(`✅ [خاص] تم إرسال الفيديو إلى: ${from}`);
-
-        } catch (dlErr) {
-            console.log(`⚠️ [خاص] فشل تحميل الفيديو: ${dlErr.message}`);
-            try {
-                await sock.sendMessage(from, {
-                    text: `⚠️ *عذراً، لم يتمكن البوت من تحميل الفيديو*\n\nقد يكون السبب:\n• الفيديو خاص أو محذوف\n• الرابط غير صحيح أو منتهي\n• الفيديو طويل جداً\n• المنصة غير مدعومة\n\n🔗 الرابط: ${videoUrl}\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-                });
-            } catch (errSendErr) {
-                console.log(`⚠️ [خاص] فشل إرسال رسالة الخطأ: ${errSendErr.message}`);
-            }
-        } finally {
-            if (videoPath) deleteFile(videoPath);
-        }
-
-    } catch (err) {
-        console.log(`⚠️ [خاص] خطأ غير متوقع في معالجة الرسالة: ${err.message}`);
-    }
 }
 
 startBot();
