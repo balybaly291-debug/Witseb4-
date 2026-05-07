@@ -61,9 +61,9 @@ async function ensureYtDlp() {
         }
     }
 
-    // تحميل yt-dlp من GitHub
+    // تحميل yt-dlp من GitHub (النسخة المستقلة - لا تحتاج Python)
     console.log('⬇️ yt-dlp غير موجود، جاري التحميل من GitHub...');
-    const dlUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+    const dlUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
     try {
         await downloadBinary(dlUrl, YT_DLP_LOCAL);
         fs.chmodSync(YT_DLP_LOCAL, '755');
