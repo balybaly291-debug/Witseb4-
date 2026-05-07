@@ -1,4 +1,4 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, makeInMemoryStore } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -428,13 +428,26 @@ async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version } = await fetchLatestBaileysVersion();
 
+    // store يحفظ جلسات المستخدمين في الذاكرة لمنع خطأ "No sessions"
+    const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
+
     const sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ["Ubuntu", "Chrome", "20.0.04"]
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        getMessage: async (key) => {
+            if (store) {
+                const msg = await store.loadMessage(key.remoteJid, key.id);
+                return msg?.message || undefined;
+            }
+            return { conversation: '' };
+        }
     });
+
+    // ربط الـ store بأحداث الـ socket
+    store.bind(sock.ev);
 
     let oggPath = null;
     if (fs.existsSync('./voice.mp3')) {
