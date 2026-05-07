@@ -71,50 +71,100 @@ function convertToOgg(inputPath) {
 }
 
 // ══════════════════════════════════════════
-// ميزة تحميل الفيديو - كشف الروابط
+// ⚡ استخراج المحتوى النصي من أي نوع رسالة
+// ══════════════════════════════════════════
+function extractText(msg) {
+    const m = msg.message;
+    if (!m) return '';
+
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.documentMessage?.caption ||
+        m.buttonsResponseMessage?.selectedDisplayText ||
+        m.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        ''
+    );
+}
+
+// ══════════════════════════════════════════
+// ⚡ كشف أي رابط في النص (يوتيوب، تيكتوك، انستقرام، فيسبوك، وأي رابط آخر)
 // ══════════════════════════════════════════
 function detectVideoUrl(text) {
-    const patterns = [
-        /https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)\/[^\s]+/i,
-        /https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com)\/[^\s]+/i,
-        /https?:\/\/(www\.)?(instagram\.com|instagr\.am)\/[^\s]+/i,
-        /https?:\/\/(www\.)?youtube\.com\/[^\s]+/i,
-        /https?:\/\/youtu\.be\/[^\s]+/i,
+    if (!text) return null;
+
+    // أولاً: منصات معروفة بالترتيب
+    const knownPatterns = [
+        /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.watch|fb\.com)\/\S+/i,
+        /https?:\/\/(?:www\.)?(?:tiktok\.com|vm\.tiktok\.com)\/@?\S+/i,
+        /https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\/(?:p|reel|tv|stories)\/\S+/i,
+        /https?:\/\/(?:www\.)?youtube\.com\/\S+/i,
+        /https?:\/\/youtu\.be\/\S+/i,
+        /https?:\/\/(?:www\.)?twitter\.com\/\S+\/status\/\S+/i,
+        /https?:\/\/(?:www\.)?x\.com\/\S+\/status\/\S+/i,
+        /https?:\/\/(?:www\.)?vimeo\.com\/\S+/i,
+        /https?:\/\/(?:www\.)?dailymotion\.com\/\S+/i,
+        /https?:\/\/(?:www\.)?twitch\.tv\/\S+/i,
+        /https?:\/\/(?:www\.)?snapchat\.com\/\S+/i,
     ];
-    for (const pattern of patterns) {
+
+    for (const pattern of knownPatterns) {
         const match = text.match(pattern);
-        if (match) return match[0];
+        if (match) return match[0].replace(/[)>\]"',]+$/, '');
     }
+
+    // ثانياً: أي رابط عام
+    const generalMatch = text.match(/https?:\/\/[^\s]+/i);
+    if (generalMatch) return generalMatch[0].replace(/[)>\]"',]+$/, '');
+
     return null;
 }
 
+// ══════════════════════════════════════════
 // تحميل الفيديو باستخدام yt-dlp
+// ══════════════════════════════════════════
 function downloadVideo(url) {
     return new Promise((resolve, reject) => {
-        const outputPath = path.join('./downloads', `video_${Date.now()}.mp4`);
-
-        // إنشاء مجلد التحميلات إذا لم يكن موجوداً
         if (!fs.existsSync('./downloads')) {
             fs.mkdirSync('./downloads', { recursive: true });
         }
+
+        const outputTemplate = path.join('./downloads', `video_${Date.now()}.%(ext)s`);
 
         const args = [
             '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             '--merge-output-format', 'mp4',
             '--no-playlist',
-            '-o', outputPath,
+            '--no-warnings',
+            '-o', outputTemplate,
             url
         ];
 
-        execFile('yt-dlp', args, { timeout: 120000 }, (error, stdout, stderr) => {
+        execFile('yt-dlp', args, { timeout: 180000 }, (error, stdout, stderr) => {
             if (error) {
                 console.log(`⚠️ yt-dlp خطأ: ${error.message}`);
+                console.log(`⚠️ yt-dlp stderr: ${stderr}`);
                 return reject(error);
             }
-            if (fs.existsSync(outputPath)) {
-                resolve(outputPath);
+
+            // البحث عن الملف المُنشأ
+            const downloadsDir = './downloads';
+            const files = fs.readdirSync(downloadsDir)
+                .filter(f => f.endsWith('.mp4') || f.endsWith('.mkv') || f.endsWith('.webm'))
+                .map(f => ({
+                    name: f,
+                    time: fs.statSync(path.join(downloadsDir, f)).mtime.getTime()
+                }))
+                .sort((a, b) => b.time - a.time);
+
+            if (files.length > 0) {
+                const latestFile = path.join(downloadsDir, files[0].name);
+                console.log(`✅ ملف الفيديو: ${latestFile}`);
+                resolve(latestFile);
             } else {
-                reject(new Error('الملف لم يُنشأ'));
+                reject(new Error('الملف لم يُنشأ بعد التحميل'));
             }
         });
     });
@@ -265,85 +315,251 @@ async function startBot() {
     const processedMessages = new Set();
 
     // ══════════════════════════════════════════
-    // معالج رسائل الخاص - ميزة تحميل الفيديو 🎬
+    // 🎬 معالج الرسائل الرئيسي
     // ══════════════════════════════════════════
     sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify') return;
+        try {
+            if (m.type !== 'notify') return;
 
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+            const msg = m.messages[0];
 
-        const msgId = msg.key.id;
-        if (processedMessages.has(msgId)) return;
-        processedMessages.add(msgId);
-        if (processedMessages.size > 2000) processedMessages.clear();
+            // تجاهل الرسائل الفارغة أو المُرسلة من البوت نفسه
+            if (!msg || !msg.message) return;
+            if (msg.key.fromMe) return;
 
-        const from = msg.key.remoteJid;
-        const isPrivate = from.endsWith('@s.whatsapp.net');
-        const isGroup = from.endsWith('@g.us');
+            const msgId = msg.key.id;
+            if (processedMessages.has(msgId)) return;
+            processedMessages.add(msgId);
+            if (processedMessages.size > 2000) processedMessages.clear();
 
-        // ══════════════════════════════════════════
-        // رسائل الخاص - تحميل الفيديو
-        // ══════════════════════════════════════════
-        if (isPrivate) {
+            const from = msg.key.remoteJid;
+            if (!from) return;
+
+            const isPrivate = from.endsWith('@s.whatsapp.net');
+            const isGroup = from.endsWith('@g.us');
+
+            // ══════════════════════════════════════════
+            // 📩 رسائل الخاص - ميزة تحميل الفيديو
+            // ══════════════════════════════════════════
+            if (isPrivate) {
+                // استخراج النص من أي نوع رسالة
+                const content = extractText(msg);
+
+                console.log(`📩 [خاص] من: ${from} | نوع: ${Object.keys(msg.message)[0]} | نص: "${content}"`);
+
+                if (!content || content.trim().length === 0) {
+                    console.log(`🔕 [خاص] رسالة بدون نص، تجاهل.`);
+                    return;
+                }
+
+                const videoUrl = detectVideoUrl(content);
+
+                if (!videoUrl) {
+                    console.log(`🔕 [خاص] لا يوجد رابط في الرسالة.`);
+                    // رد بمساعدة المستخدم
+                    await sock.sendMessage(from, {
+                        text: `🦅 *أهلاً بك في خدمة التحميل*\n\nأرسل لي رابط الفيديو من:\n• يوتيوب 🎬\n• تيكتوك 🎵\n• انستقرام 📸\n• فيسبوك 👍\n• وغيرها...\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                    });
+                    return;
+                }
+
+                console.log(`🎬 [خاص] طلب تحميل من ${from}: ${videoUrl}`);
+
+                // رسالة الانتظار
+                await sock.sendMessage(from, {
+                    text: `🦅 *أهلاً وسهلاً بكم بميزة التحميل المقدمة من صقور العراق* 🦅\n\n⏳ جاري تحميل الفيديو...\n🔗 ${videoUrl}\n\n🙏 شكراً لصبركم\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                });
+
+                let videoPath = null;
+                try {
+                    videoPath = await downloadVideo(videoUrl);
+                    const stats = fs.statSync(videoPath);
+                    const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+                    console.log(`📦 حجم الفيديو: ${fileSizeMB} MB`);
+
+                    // واتساب يقبل حتى 64MB
+                    if (stats.size > 64 * 1024 * 1024) {
+                        await sock.sendMessage(from, {
+                            text: `⚠️ *الفيديو كبير جداً (${fileSizeMB} MB)*\n\nواتساب لا يقبل ملفات أكبر من 64MB.\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                        });
+                        return;
+                    }
+
+                    const videoBuffer = fs.readFileSync(videoPath);
+
+                    await sock.sendMessage(from, {
+                        video: videoBuffer,
+                        mimetype: 'video/mp4',
+                        caption: `✅ *تم التحميل بنجاح* 🦅\n_صقور العراق - ورشة الصقور للتصميم والبرمجة_`
+                    });
+
+                    console.log(`✅ [خاص] تم إرسال الفيديو إلى: ${from}`);
+
+                } catch (err) {
+                    console.log(`⚠️ [خاص] فشل تحميل الفيديو: ${err.message}`);
+                    await sock.sendMessage(from, {
+                        text: `⚠️ *عذراً، لم يتمكن البوت من تحميل الفيديو*\n\nقد يكون السبب:\n• الفيديو خاص أو محذوف\n• الرابط غير صحيح\n• الفيديو طويل جداً\n\n🔗 الرابط: ${videoUrl}\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                    });
+                } finally {
+                    if (videoPath) deleteFile(videoPath);
+                }
+
+                return; // انتهت معالجة رسائل الخاص
+            }
+
+            // ══════════════════════════════════════════
+            // 👥 رسائل المجموعات - المنطق الأصلي
+            // ══════════════════════════════════════════
+            if (!isGroup) return;
+
+            const sender = msg.key.participant || msg.key.remoteJid;
             const type = Object.keys(msg.message)[0];
             const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
+            // معالجة الصور (imageMessage)
+            if (type === 'imageMessage') {
+                const caption = msg.message.imageMessage?.caption || "";
+                const wordCount = countWords(caption);
+                console.log(`🖼️ صورة من ${sender} - عدد الكلمات: ${wordCount}`);
+                if (wordCount > 10) {
+                    try {
+                        await sock.sendMessage(from, { delete: msg.key });
+                        console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
+                    } catch (err) { console.log("⚠️ فشل الحذف."); }
+                } else if (wordCount > 5) {
+                    if (oggPath && fs.existsSync(oggPath)) {
+                        try {
+                            await sock.sendMessage(from, {
+                                audio: fs.readFileSync(oggPath),
+                                mimetype: 'audio/ogg; codecs=opus',
+                                ptt: true,
+                            }, { quoted: msg });
+                            console.log(`🎙️ بصمة صوتية لصورة (+5 كلمة) من: ${sender}`);
+                        } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
+                    }
+                }
+                return;
+            }
+
+            // معالجة الرسائل النصية
+            const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
+            if (isMedia) return;
+
+            const isText = type === 'conversation' || type === 'extendedTextMessage';
+            if (!isText) return;
+
             if (!content || content.trim().length === 0) return;
 
-            const videoUrl = detectVideoUrl(content);
-            if (!videoUrl) return; // لا يوجد رابط فيديو، تجاهل
+            const mentionedJids = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
+            const hasMention = mentionedJids.length > 0 || content.includes('@');
 
-            console.log(`🎬 طلب تحميل من ${from}: ${videoUrl}`);
+            const trimmed = content.trim();
+            console.log(`📨 رسالة من ${sender}: "${trimmed}"`);
 
-            // إرسال رسالة الترحيب والانتظار
-            await sock.sendMessage(from, {
-                text: `🦅 *أهلاً وسهلاً بكم بميزة التحميل المقدمة من صقور العراق* 🦅\n\n⏳ ثوانٍ سيتم تحميل الفيديو الخاص بك...\n\n🙏 شكراً لكم على صبركم\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-            });
-
-            let videoPath = null;
-            try {
-                videoPath = await downloadVideo(videoUrl);
-                const videoBuffer = fs.readFileSync(videoPath);
-
-                await sock.sendMessage(from, {
-                    video: videoBuffer,
-                    mimetype: 'video/mp4',
-                    caption: '✅ *تم التحميل بنجاح* 🦅\n_صقور العراق - ورشة الصقور للتصميم والبرمجة_'
-                });
-
-                console.log(`✅ تم إرسال الفيديو إلى: ${from}`);
-            } catch (err) {
-                console.log(`⚠️ فشل تحميل الفيديو: ${err.message}`);
-                await sock.sendMessage(from, {
-                    text: `⚠️ *عذراً، لم يتمكن البوت من تحميل الفيديو*\n\nقد يكون السبب:\n• الفيديو خاص أو محذوف\n• الرابط غير صحيح\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
-                });
-            } finally {
-                if (videoPath) deleteFile(videoPath);
-            }
-            return;
-        }
-
-        // ══════════════════════════════════════════
-        // رسائل المجموعات - المنطق الأصلي
-        // ══════════════════════════════════════════
-        if (!isGroup) return;
-
-        const sender = msg.key.participant || msg.key.remoteJid;
-        const type = Object.keys(msg.message)[0];
-        const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-
-        // معالجة الصور (imageMessage)
-        if (type === 'imageMessage') {
-            const caption = msg.message.imageMessage?.caption || "";
-            const wordCount = countWords(caption);
-            console.log(`🖼️ صورة من ${sender} - عدد الكلمات: ${wordCount}`);
-            if (wordCount > 10) {
+            // القائمة الثانية (نقطتين ..)
+            if (trimmed === '..') {
+                const quotedParticipant2 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
+                const replyTarget2 = quotedParticipant2 || null;
                 try {
-                    await sock.sendMessage(from, { delete: msg.key });
-                    console.log(`🗑️ حذف صورة (+10 كلمة) من: ${sender}`);
-                } catch (err) { console.log("⚠️ فشل الحذف."); }
-            } else if (wordCount > 5) {
+                    const sendOpts = replyTarget2
+                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget2 }, message: {} } }
+                        : { quoted: msg };
+                    await sock.sendMessage(from, {
+                        image: { url: MENU2_IMAGE },
+                        caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
+                    }, sendOpts);
+                    await redis.set('menu2:' + from, '1', { EX: 3600 });
+                    await redis.del('menu1:' + from);
+                    console.log('📋 قائمة 2 لمجموعة: ' + from);
+                } catch (err) {
+                    console.log('⚠️ فشل قائمة 2: ' + err.message);
+                }
+                return;
+            }
+
+            // القائمة الأولى (نقطة واحدة .)
+            if (trimmed === '.') {
+                const quotedParticipant1 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
+                const replyTarget1 = quotedParticipant1 || null;
+                try {
+                    const sendOpts = replyTarget1
+                        ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget1 }, message: {} } }
+                        : { quoted: msg };
+                    await sock.sendMessage(from, {
+                        image: { url: MENU1_IMAGE },
+                        caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
+                    }, sendOpts);
+                    await redis.set('menu1:' + from, '1', { EX: 3600 });
+                    await redis.del('menu2:' + from);
+                    console.log('📋 قائمة 1 لمجموعة: ' + from);
+                } catch (err) {
+                    console.log('⚠️ فشل قائمة 1: ' + err.message);
+                }
+                return;
+            }
+
+            // معالجة اختيار رقم من القوائم
+            const choice = parseInt(trimmed);
+
+            if (!isNaN(choice) && choice >= 1) {
+                const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant || null;
+                const targetJid = (hasMention && mentionedJids.length > 0)
+                    ? mentionedJids[0]
+                    : (quotedParticipant || sender);
+                const quotedMsg = quotedParticipant
+                    ? { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant }, message: {} }
+                    : msg;
+
+                const inMenu2 = await redis.get('menu2:' + from);
+                if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
+                    const selected = menu2Videos[choice - 1];
+                    try {
+                        const targetNumber = targetJid.replace('@s.whatsapp.net', '');
+                        await sock.sendMessage(from, {
+                            video: { url: selected.url },
+                            mimetype: 'video/mp4',
+                            caption: `@${targetNumber}`,
+                            mentions: [targetJid]
+                        }, { quoted: quotedMsg });
+                        await redis.del('menu2:' + from);
+                        console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
+                    } catch (err) {
+                        console.log('⚠️ فشل فيديو قائمة 2: ' + err.message);
+                    }
+                    return;
+                }
+
+                const inMenu1 = await redis.get('menu1:' + from);
+                if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
+                    const selected = menu1Videos[choice - 1];
+                    try {
+                        const targetNumber = targetJid.replace('@s.whatsapp.net', '');
+                        await sock.sendMessage(from, {
+                            video: { url: selected.url },
+                            mimetype: 'video/mp4',
+                            caption: `@${targetNumber}`,
+                            mentions: [targetJid]
+                        }, { quoted: quotedMsg });
+                        await redis.del('menu1:' + from);
+                        console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
+                    } catch (err) {
+                        console.log('⚠️ فشل فيديو قائمة 1: ' + err.message);
+                    }
+                    return;
+                }
+            }
+
+            // تجاهل التاكات الغير مرتبطة بالقوائم
+            if (hasMention) {
+                console.log(`🔕 تجاهل تاك من: ${sender}`);
+                return;
+            }
+
+            // منطق التحذير والحذف
+            const warned = await isWarned(sender);
+
+            if (!warned) {
+                console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
                 if (oggPath && fs.existsSync(oggPath)) {
                     try {
                         await sock.sendMessage(from, {
@@ -351,154 +567,25 @@ async function startBot() {
                             mimetype: 'audio/ogg; codecs=opus',
                             ptt: true,
                         }, { quoted: msg });
-                        console.log(`🎙️ بصمة صوتية لصورة (+5 كلمة) من: ${sender}`);
+                        console.log(`🎙️ تم إرسال البصمة لـ: ${sender}`);
                     } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
                 }
-            }
-            return;
-        }
+                await addWarned(sender);
 
-        // معالجة الرسائل النصية
-        const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
-        if (isMedia) return;
-
-        const isText = type === 'conversation' || type === 'extendedTextMessage';
-        if (!isText) return;
-
-        if (!content || content.trim().length === 0) return;
-
-        const mentionedJids = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
-        const hasMention = mentionedJids.length > 0 || content.includes('@');
-
-        const trimmed = content.trim();
-        console.log(`📨 رسالة من ${sender}: "${trimmed}"`);
-
-        // القائمة الثانية (نقطتين ..)
-        if (trimmed === '..') {
-            const quotedParticipant2 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-            const replyTarget2 = quotedParticipant2 || null;
-            try {
-                const sendOpts = replyTarget2
-                    ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget2 }, message: {} } }
-                    : { quoted: msg };
-                await sock.sendMessage(from, {
-                    image: { url: MENU2_IMAGE },
-                    caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
-                }, sendOpts);
-                await redis.set('menu2:' + from, '1', { EX: 3600 });
-                await redis.del('menu1:' + from);
-                console.log('📋 قائمة 2 لمجموعة: ' + from);
-            } catch (err) {
-                console.log('⚠️ فشل قائمة 2: ' + err.message);
-            }
-            return;
-        }
-
-        // القائمة الأولى (نقطة واحدة .)
-        if (trimmed === '.') {
-            const quotedParticipant1 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-            const replyTarget1 = quotedParticipant1 || null;
-            try {
-                const sendOpts = replyTarget1
-                    ? { quoted: { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: replyTarget1 }, message: {} } }
-                    : { quoted: msg };
-                await sock.sendMessage(from, {
-                    image: { url: MENU1_IMAGE },
-                    caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
-                }, sendOpts);
-                await redis.set('menu1:' + from, '1', { EX: 3600 });
-                await redis.del('menu2:' + from);
-                console.log('📋 قائمة 1 لمجموعة: ' + from);
-            } catch (err) {
-                console.log('⚠️ فشل قائمة 1: ' + err.message);
-            }
-            return;
-        }
-
-        // معالجة اختيار رقم من القوائم
-        const choice = parseInt(trimmed);
-
-        if (!isNaN(choice) && choice >= 1) {
-            const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-            const targetJid = (hasMention && mentionedJids.length > 0)
-                ? mentionedJids[0]
-                : (quotedParticipant || sender);
-            const quotedMsg = quotedParticipant
-                ? { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant }, message: {} }
-                : msg;
-
-            const inMenu2 = await redis.get('menu2:' + from);
-            if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
-                const selected = menu2Videos[choice - 1];
-                try {
-                    const targetNumber = targetJid.replace('@s.whatsapp.net', '');
-                    await sock.sendMessage(from, {
-                        video: { url: selected.url },
-                        mimetype: 'video/mp4',
-                        caption: `@${targetNumber}`,
-                        mentions: [targetJid]
-                    }, { quoted: quotedMsg });
-                    await redis.del('menu2:' + from);
-                    console.log(`✅ [قائمة2] فيديو ${choice} → ${targetJid}`);
-                } catch (err) {
-                    console.log('⚠️ فشل فيديو قائمة 2: ' + err.message);
+            } else {
+                const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
+                if (hasAnyLink) {
+                    console.log(`🔕 تجاهل رابط من: ${sender}`);
+                    return;
                 }
-                return;
-            }
-
-            const inMenu1 = await redis.get('menu1:' + from);
-            if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
-                const selected = menu1Videos[choice - 1];
+                console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
                 try {
-                    const targetNumber = targetJid.replace('@s.whatsapp.net', '');
-                    await sock.sendMessage(from, {
-                        video: { url: selected.url },
-                        mimetype: 'video/mp4',
-                        caption: `@${targetNumber}`,
-                        mentions: [targetJid]
-                    }, { quoted: quotedMsg });
-                    await redis.del('menu1:' + from);
-                    console.log(`✅ [قائمة1] فيديو ${choice} → ${targetJid}`);
-                } catch (err) {
-                    console.log('⚠️ فشل فيديو قائمة 1: ' + err.message);
-                }
-                return;
+                    await sock.sendMessage(from, { delete: msg.key });
+                } catch (err) { console.log("⚠️ فشل الحذف - تأكد أن البوت مشرف."); }
             }
-        }
 
-        // تجاهل التاكات الغير مرتبطة بالقوائم
-        if (hasMention) {
-            console.log(`🔕 تجاهل تاك من: ${sender}`);
-            return;
-        }
-
-        // منطق التحذير والحذف
-        const warned = await isWarned(sender);
-
-        if (!warned) {
-            console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
-            if (oggPath && fs.existsSync(oggPath)) {
-                try {
-                    await sock.sendMessage(from, {
-                        audio: fs.readFileSync(oggPath),
-                        mimetype: 'audio/ogg; codecs=opus',
-                        ptt: true,
-                    }, { quoted: msg });
-                    console.log(`🎙️ تم إرسال البصمة لـ: ${sender}`);
-                } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
-            }
-            await addWarned(sender);
-
-        } else {
-            const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
-            if (hasAnyLink) {
-                console.log(`🔕 تجاهل رابط من: ${sender}`);
-                return;
-            }
-            console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
-            try {
-                await sock.sendMessage(from, { delete: msg.key });
-            } catch (err) { console.log("⚠️ فشل الحذف - تأكد أن البوت مشرف."); }
+        } catch (globalErr) {
+            console.log(`⚠️ خطأ عام في معالج الرسائل: ${globalErr.message}`);
         }
     });
 
