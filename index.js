@@ -1,6 +1,8 @@
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
+const path = require('path');
+const { execFile } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { createClient } = require('redis');
@@ -34,7 +36,7 @@ function generateOTP() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
 async function saveOTP(phone, otp) {
-    await redis.set(`otp:${phone}`, otp, { EX: 300 }); // 5 دقائق
+    await redis.set(`otp:${phone}`, otp, { EX: 300 });
 }
 async function getOTP(phone) {
     return await redis.get(`otp:${phone}`);
@@ -66,6 +68,63 @@ function convertToOgg(inputPath) {
             .on('error', (err) => { console.log('⚠️ فشل التحويل:', err.message); reject(err); })
             .save(outputPath);
     });
+}
+
+// ══════════════════════════════════════════
+// ميزة تحميل الفيديو - كشف الروابط
+// ══════════════════════════════════════════
+function detectVideoUrl(text) {
+    const patterns = [
+        /https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)\/[^\s]+/i,
+        /https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com)\/[^\s]+/i,
+        /https?:\/\/(www\.)?(instagram\.com|instagr\.am)\/[^\s]+/i,
+        /https?:\/\/(www\.)?youtube\.com\/[^\s]+/i,
+        /https?:\/\/youtu\.be\/[^\s]+/i,
+    ];
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) return match[0];
+    }
+    return null;
+}
+
+// تحميل الفيديو باستخدام yt-dlp
+function downloadVideo(url) {
+    return new Promise((resolve, reject) => {
+        const outputPath = path.join('./downloads', `video_${Date.now()}.mp4`);
+
+        // إنشاء مجلد التحميلات إذا لم يكن موجوداً
+        if (!fs.existsSync('./downloads')) {
+            fs.mkdirSync('./downloads', { recursive: true });
+        }
+
+        const args = [
+            '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '--no-playlist',
+            '-o', outputPath,
+            url
+        ];
+
+        execFile('yt-dlp', args, { timeout: 120000 }, (error, stdout, stderr) => {
+            if (error) {
+                console.log(`⚠️ yt-dlp خطأ: ${error.message}`);
+                return reject(error);
+            }
+            if (fs.existsSync(outputPath)) {
+                resolve(outputPath);
+            } else {
+                reject(new Error('الملف لم يُنشأ'));
+            }
+        });
+    });
+}
+
+// حذف الملف المؤقت بعد الإرسال
+function deleteFile(filePath) {
+    try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {}
 }
 
 // ══════════════════════════════════════════
@@ -143,7 +202,6 @@ async function startBot() {
     const app = express();
     app.use(express.json());
 
-    // CORS
     app.use((req, res, next) => {
         res.header('Access-Control-Allow-Origin', '*');
         res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -158,7 +216,6 @@ async function startBot() {
         res.json({ status: '🦅 صقور العراق - OTP Service يعمل', time: new Date().toISOString() });
     });
 
-    // إرسال OTP عبر واتساب
     app.post('/send-otp', async (req, res) => {
         const { phone, secret } = req.body;
         if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -181,7 +238,6 @@ async function startBot() {
         }
     });
 
-    // التحقق من OTP
     app.post('/verify-otp', async (req, res) => {
         const { phone, otp, secret } = req.body;
         if (secret !== OTP_SECRET) return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -208,25 +264,76 @@ async function startBot() {
     // ══════════════════════════════════════════
     const processedMessages = new Set();
 
+    // ══════════════════════════════════════════
+    // معالج رسائل الخاص - ميزة تحميل الفيديو 🎬
+    // ══════════════════════════════════════════
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type !== 'notify') return;
 
         const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe || !msg.key.remoteJid.endsWith('@g.us')) return;
+        if (!msg.message || msg.key.fromMe) return;
 
         const msgId = msg.key.id;
         if (processedMessages.has(msgId)) return;
         processedMessages.add(msgId);
-        if (processedMessages.size > 1000) processedMessages.clear();
+        if (processedMessages.size > 2000) processedMessages.clear();
 
         const from = msg.key.remoteJid;
+        const isPrivate = from.endsWith('@s.whatsapp.net');
+        const isGroup = from.endsWith('@g.us');
+
+        // ══════════════════════════════════════════
+        // رسائل الخاص - تحميل الفيديو
+        // ══════════════════════════════════════════
+        if (isPrivate) {
+            const type = Object.keys(msg.message)[0];
+            const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+
+            if (!content || content.trim().length === 0) return;
+
+            const videoUrl = detectVideoUrl(content);
+            if (!videoUrl) return; // لا يوجد رابط فيديو، تجاهل
+
+            console.log(`🎬 طلب تحميل من ${from}: ${videoUrl}`);
+
+            // إرسال رسالة الترحيب والانتظار
+            await sock.sendMessage(from, {
+                text: `🦅 *أهلاً وسهلاً بكم بميزة التحميل المقدمة من صقور العراق* 🦅\n\n⏳ ثوانٍ سيتم تحميل الفيديو الخاص بك...\n\n🙏 شكراً لكم على صبركم\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+            });
+
+            let videoPath = null;
+            try {
+                videoPath = await downloadVideo(videoUrl);
+                const videoBuffer = fs.readFileSync(videoPath);
+
+                await sock.sendMessage(from, {
+                    video: videoBuffer,
+                    mimetype: 'video/mp4',
+                    caption: '✅ *تم التحميل بنجاح* 🦅\n_صقور العراق - ورشة الصقور للتصميم والبرمجة_'
+                });
+
+                console.log(`✅ تم إرسال الفيديو إلى: ${from}`);
+            } catch (err) {
+                console.log(`⚠️ فشل تحميل الفيديو: ${err.message}`);
+                await sock.sendMessage(from, {
+                    text: `⚠️ *عذراً، لم يتمكن البوت من تحميل الفيديو*\n\nقد يكون السبب:\n• الفيديو خاص أو محذوف\n• الرابط غير صحيح\n\n🛠️ *ورشة الصقور للتصميم والبرمجة*`
+                });
+            } finally {
+                if (videoPath) deleteFile(videoPath);
+            }
+            return;
+        }
+
+        // ══════════════════════════════════════════
+        // رسائل المجموعات - المنطق الأصلي
+        // ══════════════════════════════════════════
+        if (!isGroup) return;
+
         const sender = msg.key.participant || msg.key.remoteJid;
         const type = Object.keys(msg.message)[0];
         const content = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-        // ══════════════════════════════════════════
         // معالجة الصور (imageMessage)
-        // ══════════════════════════════════════════
         if (type === 'imageMessage') {
             const caption = msg.message.imageMessage?.caption || "";
             const wordCount = countWords(caption);
@@ -251,9 +358,7 @@ async function startBot() {
             return;
         }
 
-        // ══════════════════════════════════════════
         // معالجة الرسائل النصية
-        // ══════════════════════════════════════════
         const isMedia = ['videoMessage', 'stickerMessage', 'audioMessage', 'documentMessage'].includes(type);
         if (isMedia) return;
 
@@ -262,23 +367,14 @@ async function startBot() {
 
         if (!content || content.trim().length === 0) return;
 
-        // ══════════════════════════════════════════
-        // استخراج التاك الموجَّه (إن وُجد)
-        // ══════════════════════════════════════════
         const mentionedJids = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
         const hasMention = mentionedJids.length > 0 || content.includes('@');
-
-        // تجاهل التاكات العادية (غير المرتبطة بقوائم الفيديو)
-        // — سنتعامل مع التاك داخل منطق القوائم فقط
 
         const trimmed = content.trim();
         console.log(`📨 رسالة من ${sender}: "${trimmed}"`);
 
-        // ══════════════════════════════════════════
-        // القائمة الثانية (نقطتين ..) — أولوية أعلى
-        // ══════════════════════════════════════════
+        // القائمة الثانية (نقطتين ..)
         if (trimmed === '..') {
-            // استخراج الشخص المقتبس إن وُجد
             const quotedParticipant2 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
             const replyTarget2 = quotedParticipant2 || null;
             try {
@@ -289,8 +385,8 @@ async function startBot() {
                     image: { url: MENU2_IMAGE },
                     caption: '✏️ *اكتب رقم من 1 إلى 4 لإرسال الفيديو المطلوب*'
                 }, sendOpts);
-                await redis.set('menu2:' + from, '1', { EX: 3600 }); // ساعة
-                await redis.del('menu1:' + from); // حذف القائمة الأولى فوراً
+                await redis.set('menu2:' + from, '1', { EX: 3600 });
+                await redis.del('menu1:' + from);
                 console.log('📋 قائمة 2 لمجموعة: ' + from);
             } catch (err) {
                 console.log('⚠️ فشل قائمة 2: ' + err.message);
@@ -298,11 +394,8 @@ async function startBot() {
             return;
         }
 
-        // ══════════════════════════════════════════
         // القائمة الأولى (نقطة واحدة .)
-        // ══════════════════════════════════════════
         if (trimmed === '.') {
-            // استخراج الشخص المقتبس إن وُجد
             const quotedParticipant1 = msg.message.extendedTextMessage?.contextInfo?.participant || null;
             const replyTarget1 = quotedParticipant1 || null;
             try {
@@ -313,8 +406,8 @@ async function startBot() {
                     image: { url: MENU1_IMAGE },
                     caption: '✏️ *اكتب رقم من 1 إلى 9 لإرسال الفيديو المطلوب*'
                 }, sendOpts);
-                await redis.set('menu1:' + from, '1', { EX: 3600 }); // ساعة
-                await redis.del('menu2:' + from); // حذف القائمة الثانية فوراً
+                await redis.set('menu1:' + from, '1', { EX: 3600 });
+                await redis.del('menu2:' + from);
                 console.log('📋 قائمة 1 لمجموعة: ' + from);
             } catch (err) {
                 console.log('⚠️ فشل قائمة 1: ' + err.message);
@@ -322,27 +415,18 @@ async function startBot() {
             return;
         }
 
-        // ══════════════════════════════════════════
         // معالجة اختيار رقم من القوائم
-        // ══════════════════════════════════════════
         const choice = parseInt(trimmed);
 
         if (!isNaN(choice) && choice >= 1) {
-
-            // الشخص المقتبس في رسالة الرقم (إن وُجد)
             const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant || null;
-
-            // الأولوية: تاك صريح → مقتبس → الضاغط نفسه
             const targetJid = (hasMention && mentionedJids.length > 0)
                 ? mentionedJids[0]
                 : (quotedParticipant || sender);
-
-            // رسالة الرد: إذا كان مقتبس نرد عليه، وإلا نرد على رسالة الرقم
             const quotedMsg = quotedParticipant
                 ? { key: { remoteJid: from, id: msg.message.extendedTextMessage?.contextInfo?.stanzaId, participant: quotedParticipant }, message: {} }
                 : msg;
 
-            // — القائمة الثانية لها أولوية إذا كانت مفعّلة في المجموعة
             const inMenu2 = await redis.get('menu2:' + from);
             if (inMenu2 && choice >= 1 && choice <= menu2Videos.length) {
                 const selected = menu2Videos[choice - 1];
@@ -362,7 +446,6 @@ async function startBot() {
                 return;
             }
 
-            // — القائمة الأولى
             const inMenu1 = await redis.get('menu1:' + from);
             if (inMenu1 && choice >= 1 && choice <= menu1Videos.length) {
                 const selected = menu1Videos[choice - 1];
@@ -383,17 +466,13 @@ async function startBot() {
             }
         }
 
-        // ══════════════════════════════════════════
         // تجاهل التاكات الغير مرتبطة بالقوائم
-        // ══════════════════════════════════════════
         if (hasMention) {
             console.log(`🔕 تجاهل تاك من: ${sender}`);
             return;
         }
 
-        // ══════════════════════════════════════════
         // منطق التحذير والحذف
-        // ══════════════════════════════════════════
         const warned = await isWarned(sender);
 
         if (!warned) {
