@@ -493,7 +493,8 @@ async function startBot() {
             const from = msg.key.remoteJid;
             if (!from) return;
 
-            const isPrivate = from.endsWith('@s.whatsapp.net');
+            // @lid هو صيغة جديدة في واتساب للرسائل الخاصة
+            const isPrivate = from.endsWith('@s.whatsapp.net') || from.endsWith('@lid');
             const isGroup = from.endsWith('@g.us');
 
             // ── الخاص: ميزة التحميل فقط ──
