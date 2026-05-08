@@ -711,9 +711,13 @@ async function startBot() {
                             ptt: true,
                         }, { quoted: msg });
                         console.log(`🎙️ تم إرسال البصمة لـ: ${sender}`);
-                    } catch (err) { console.log(`⚠️ فشل إرسال الصوت: ${err.message}`); }
+                        await addWarned(sender);
+                    } catch (err) {
+                        console.log(`⚠️ فشل إرسال الصوت: ${err.message} → لن يُسجَّل كمحذَّر`);
+                    }
+                } else {
+                    console.log(`⚠️ voice.mp3 غير موجود → لن يُسجَّل ${sender} كمحذَّر`);
                 }
-                await addWarned(sender);
             } else {
                 const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
                 if (hasAnyLink) {
