@@ -94,6 +94,22 @@ async function addWarned(sender) {
 }
 
 // ══════════════════════════════════════════
+// تتبع الرسائل المعالجة في Redis لمنع التكرار
+// ══════════════════════════════════════════
+async function isProcessed(msgId) {
+    try {
+        const result = await redis.get(`processed:${msgId}`);
+        return result !== null;
+    } catch (e) { return false; }
+}
+async function markProcessed(msgId) {
+    try {
+        // تُحفظ لمدة 10 دقائق فقط
+        await redis.set(`processed:${msgId}`, '1', { EX: 600 });
+    } catch (e) { console.log('⚠️ فشل تسجيل الرسالة في Redis'); }
+}
+
+// ══════════════════════════════════════════
 // OTP - تخزين في Redis
 // ══════════════════════════════════════════
 function generateOTP() {
@@ -527,38 +543,25 @@ async function startBot() {
     });
 
     // ══════════════════════════════════════════
-    // cache لمنع معالجة نفس الرسالة مرتين
-    // ══════════════════════════════════════════
-    const processedMessages = new Set();
-
-    // ══════════════════════════════════════════
     // 🎬 معالج الرسائل الرئيسي
     // ══════════════════════════════════════════
     sock.ev.on('messages.upsert', async (m) => {
         try {
-            // تسجيل كل حدث وارد لمساعدة التشخيص
-            console.log(`🔍 [RAW] type: ${m.type} | count: ${m.messages?.length}`);
-
-            // قبلاً كان يُرفض أي نوع غير 'notify' - أُزلنا هذا الفلتر
-            // لأن رسائل الخاص قد تصل بنوع 'append' في بعض إصدارات Baileys
             if (!m.messages || m.messages.length === 0) return;
 
             const msg = m.messages[0];
-
-            // تسجيل تفاصيل الرسالة الخام
-            if (msg) {
-                const rawFrom = msg.key?.remoteJid || 'unknown';
-                const rawType = Object.keys(msg.message || {})[0] || 'none';
-                console.log(`🔍 [RAW] from: ${rawFrom} | msgType: ${rawType} | fromMe: ${msg.key?.fromMe}`);
-            }
 
             if (!msg || !msg.message) return;
             if (msg.key.fromMe) return;
 
             const msgId = msg.key.id;
-            if (processedMessages.has(msgId)) return;
-            processedMessages.add(msgId);
-            if (processedMessages.size > 2000) processedMessages.clear();
+
+            // فحص Redis لمنع معالجة نفس الرسالة مرتين حتى بعد إعادة التشغيل
+            if (await isProcessed(msgId)) {
+                console.log(`🔁 [SKIP] رسالة مكررة: ${msgId}`);
+                return;
+            }
+            await markProcessed(msgId);
 
             const from = msg.key.remoteJid;
             if (!from) return;
@@ -702,7 +705,8 @@ async function startBot() {
 
             const warned = await isWarned(sender);
             if (!warned) {
-                console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة`);
+                console.log(`🆕 مستخدم جديد: ${sender} → إرسال البصمة + حذف رسالته`);
+                // إرسال الصوت
                 if (oggPath && fs.existsSync(oggPath)) {
                     try {
                         await sock.sendMessage(from, {
@@ -718,12 +722,13 @@ async function startBot() {
                 } else {
                     console.log(`⚠️ voice.mp3 غير موجود → لن يُسجَّل ${sender} كمحذَّر`);
                 }
+                // حذف رسالته فوراً
+                try {
+                    await sock.sendMessage(from, { delete: msg.key });
+                    console.log(`🗑️ حذف رسالة الجديد: ${sender}`);
+                } catch (err) { console.log("⚠️ فشل حذف رسالة الجديد."); }
             } else {
-                const hasAnyLink = /(https?:\/\/|www\.)[^\s]+/i.test(content);
-                if (hasAnyLink) {
-                    console.log(`🔕 تجاهل رابط من: ${sender}`);
-                    return;
-                }
+                // محفوظ: حذف كل رسائله بدون استثناء
                 console.log(`🗑️ حذف رسالة ${sender} (محفوظ مسبقاً)`);
                 try {
                     await sock.sendMessage(from, { delete: msg.key });
